@@ -2,6 +2,37 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/) 和 [语义化版本](https://semver.org/)。
 
+## [Unreleased]
+
+一次系统性的实盘安全审查后的分批修复（每项均先复现验证、再修、再回归；离线套件 523 → 591 passed）。
+
+### 修复
+
+- **raw 桥（`get_market_data_ex_ori`，国泰式部署）的 13 位毫秒 stime 全毁数据链路**【已实测复现】：客户端只认 8/14 位日期串，毫秒戳被截成 8 位垃圾"日期"——相邻 bar 索引相同（本地缓存把整段历史折叠成 1 行）、`time` 列全 None、日期窗口比较全 False（`get_local_data` 在"下载成功"后返回空）。现在毫秒戳按北京时间转成 `YYYYMMDDHHMMSS` 再归一化。同时 raw 桥空 `field_list`（MiniQMT 惯用法=全部字段）改为请求并命名标准 OHLCV 字段集，不再产出无法做窗口过滤的无名列。
+- **下单结算把活单报成失败（重复下单陷阱），三处联动修复**：
+  - 查到委托行但委托号未分配时继续等到死线（原来立即"结算"，客户端 `order_stock` 拿到 -1）；死线时该行存在 → `ok` 应答 + 明确"委托号未分配"说明。
+  - 结算查询改用 `query_orders_strict`（普通版把查询失败吞成 `[]`，"查不到"和"查询坏了"无法区分）；查询持续失败到死线 → `server_error` 报"状态未知，重试前先按 user_order_id 查询"。
+  - 默认结算超时 3s→8s（QMT 委托查询读本地缓存，无主推柜台 1–6s 才刷新——自家 API 参考 1.5）；客户端同步下单 RPC 超时抬到 ≥12s 以覆盖等待窗。
+- **`order_stock_batch` 响应被单笔结算覆盖**：批内逐笔走完整单笔 handler，单槽 settlement 只剩最后一笔，结算后整个 list 响应被替换成那一笔的 `OrderSubmitResult`。批处理现在只走提交核心，id 由回调/查询按 `user_order_id` 回填。
+- **全推行情静默中断且无法自愈**：一次瞬时 Redis/ZMQ 错误就会杀死订阅线程（topic 集合不变则永不重启、心跳照常成功）；`replay_subscriptions` 的 RPC 无保护，恰好在上游刚恢复最易抛错时杀死心跳线程 → 服务端 30s 后回收全部订阅。现在订阅线程带退避重连、心跳每轮容错并探测订阅线程存活（`is_alive`）自动复活。
+- **持仓查询失败被当成空持仓并污染缓存**：`get_trade_detail_data` 失败时 `get_positions` 返回 `{}`，trade_event 触发的 sync 把空快照 `setex` 覆盖最长 120s 的好缓存，卖出风控全部被拦。现在"资产字段全空 + 无持仓"这一失败签名直接跳过发布；真实空账户（资产有值）照常发布。持仓缓存快照补全字段（frozen/on_road/yesterday、市值、现价、开仓价、方向），缓存回退与实时查询数值一致。
+- **`percentage=0` 触发全仓卖出**：`float(0 or 100)` = 100。显式 0/负数现在拒绝（`invalid_percentage`），>100 截到可用仓位。
+- **ZMQ 部署交易上下文查询静默返回空**：官方交易查询全局（`get_new_purchase_limit`、两融合约、期权持仓/组合、`query_execution_snapshot` 等）补入 `LISTENER_DEFERRED_METHODS`——ZMQ 强制后台接收线程，这些方法离开主策略线程返回空却 `ok=True`。
+- **裸代码市场推断**：43/83/87/88/92 → `.BJ`、11 → `.SH`（沪转债）。误判 `.SZ` 会把委托报错市场、`.BJ` 持仓永远查不到。
+- **`download_history_data2` 服务端改用关键字传 `callback=`**：不同 xtdata 版本第 5 位置参是 `callback` 或 `incrementally`，位置传 lambda 可能静默切换成"仅从本地最后一根增量下载"，历史缺口永不回补。
+- **可撤单过滤漏 49（待报）**：刚提交、最该抢撤的窗口查不到可撤单。
+- **`to_jsonable` 截断 `pandas.Timestamp` 亚秒**：Timestamp 是 datetime 子类先命中截断分支，精心写的 pandas isoformat 分支是死代码。
+- **节假日 fallback 与毫秒戳比较**：xtdata 返回毫秒时间戳的部署上，`str(ms)` 与 `'YYYYMMDD'` 永不命中 → 一年内每个工作日都判为假日。交易日条目现在统一归一化（毫秒戳或字符串都认）。`get_market_last_trade_date` 同样归一化为文档声明的 `YYYYMMDD`。
+- **full_tick 空快照当新鲜数据**：QMT 对无行情代码写 `{}` 会被当有效缓存，TTL 内一直返回空且不走活体 RPC 兜底。读写两侧都把空快照视为 miss。
+- **成交手续费字段拼写**：候选加入旧版单 s 的 `m_dComission`（原 `m_dComssion` 双 s 谁都匹配不上）。
+- **下载任务共享队列 TTL 被短任务削短**：只在能延长时刷新。
+- **价格精度**：56/58（沪 ETF）、11/12（可转债）按三位小数取整，避免限价被柜台拒单。
+
+### 新增
+
+- **异步下载任务 API（客户端）**：`submit_download_history_data2` / `submit_download_history_data` / `get_download_status` / `wait_download`。shim 一直在转发这四个名字但 compat 从未实现（一调就 AttributeError），服务端 download_jobs 早已就绪。`wait_download` 在客户端轮询状态，不调服务端会阻塞处理线程 600s 的同名 handler。
+- **`get_instrument_detail_list` 全链路**：provider（键回写调用方拼写、单代码失败不影响其余）+ 白名单注册 + compat 封装。下游实盘的 `*ST` 过滤（按 `InstrumentName`）依赖此调用。
+
 ## [0.2.14] - 2026-08-28
 
 ### 新增
