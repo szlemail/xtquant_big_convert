@@ -1286,3 +1286,121 @@ class ToJsonablePandasTimestampTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StagedSysidGateway(DryRunOrderGateway):
+    """Rows appear per lookup; sysid arrives in a later stage ("", then the id)."""
+
+    def __init__(self, stages):
+        super().__init__()
+        self.stages = [list(stage) for stage in stages]
+        self._request = None
+
+    def submit(self, request):
+        self._request = request
+        return super().submit(request)
+
+    def query_orders(self, account_id, strategy_name):
+        rows = self.stages.pop(0) if self.stages else []
+        return [
+            OrderSnapshot(
+                order_sys_id=sysid,
+                user_order_id=str(self._request.remark or ""),
+                stock_code=self._request.stock_code,
+                action=self._request.action,
+                volume=self._request.volume,
+                traded_volume=0,
+                status="50",
+            )
+            for sysid in rows
+        ]
+
+
+class ExplodingQueryGateway(DryRunOrderGateway):
+    def query_orders(self, account_id, strategy_name):
+        raise RuntimeError("get_trade_detail_data blew up")
+
+
+class SettlementSemanticsTest(unittest.TestCase):
+    """An alive order must never be reported as failed."""
+
+    def _service(self, gateway, timeout=5.0):
+        redis_client = FakeRedis()
+        handlers = BigQmtRpcHandlers(
+            account_id="acct", market_data=FakeMarketData(),
+            position_provider=FakePositionProvider(), order_gateway=gateway,
+            allow_order_methods=True, order_settle_timeout_seconds=timeout,
+        )
+        return redis_client, RedisPubSubRpcService(redis_client, handlers, account_id="acct")
+
+    def _submit(self, service, request_id="ord-1"):
+        service.enqueue_payload({
+            "request_id": request_id, "account_id": "acct", "method": "order_stock",
+            "params": {"stock_code": "600000.SH", "order_type": 23, "order_volume": 100,
+                       "price_type": 11, "price": 10.1, "order_remark": request_id},
+        })
+
+    def _response(self, redis_client, request_id):
+        return json.loads(redis_client.kv["bigqmt:rpc:resp:acct:%s" % request_id])
+
+    def test_row_without_sysid_keeps_waiting_then_backfills(self):
+        gateway = StagedSysidGateway(stages=[[""], ["sysid-x"]])
+        redis_client, service = self._service(gateway, timeout=5.0)
+        self._submit(service)
+
+        service.drain_pending()  # parks; first lookup sees the row, no id yet
+        self.assertNotIn("bigqmt:rpc:resp:acct:ord-1", redis_client.kv)
+        self.assertEqual(service.pending_settlement_count(), 1)
+
+        service.drain_pending()  # id assigned -> settles with it
+        response = self._response(redis_client, "ord-1")
+        self.assertTrue(response["ok"], response["error"])
+        self.assertEqual(response["data"]["order_sys_id"], "sysid-x")
+        self.assertEqual(response["server_error"], "")
+
+    def test_row_without_sysid_at_deadline_is_ok_with_pending_note(self):
+        gateway = StagedSysidGateway(stages=[[""]])
+        redis_client, service = self._service(gateway, timeout=0.0)
+        self._submit(service)
+        service.drain_pending()  # park
+        service.drain_pending()  # settle at deadline: order EXISTS, no id yet
+
+        response = self._response(redis_client, "ord-1")
+        self.assertTrue(response["ok"])
+        # not an error: the order is in the system
+        self.assertEqual(response["server_error"], "")
+        self.assertIn("not assigned", response["data"]["message"])
+
+    def test_broken_lookup_retries_and_reports_unknown_state(self):
+        gateway = ExplodingQueryGateway()
+        redis_client, service = self._service(gateway, timeout=0.0)
+        self._submit(service)
+        service.drain_pending()  # park
+        service.drain_pending()  # first settle attempt: exception, deadline hit
+
+        response = self._response(redis_client, "ord-1")
+        self.assertTrue(response["ok"])
+        self.assertIn("unknown", response["server_error"])
+        self.assertIn("ord-1", response["server_error"])  # carries user_order_id
+
+    def test_batch_response_is_a_list_and_not_replaced_by_settlement(self):
+        redis_client, service = self._service(DryRunOrderGateway(), timeout=5.0)
+        service.enqueue_payload({
+            "request_id": "batch-1", "account_id": "acct", "method": "order_stock_batch",
+            "params": {"orders": [
+                {"account_id": "acct", "stock_code": "600000.SH", "order_type": 23,
+                 "order_volume": 100, "price": 10.0, "order_remark": "batch-a"},
+                {"account_id": "acct", "stock_code": "000001.SZ", "order_type": 24,
+                 "order_volume": 100, "price": 10.5, "order_remark": "batch-b"},
+            ]},
+        })
+        service.drain_pending()
+        service.drain_pending()  # extra pass would previously replace the list
+
+        response = self._response(redis_client, "batch-1")
+        self.assertTrue(response["ok"], response["error"])
+        self.assertIsInstance(response["data"], list)
+        self.assertEqual(len(response["data"]), 2)
+        self.assertTrue(all(item["success"] for item in response["data"]))
+        # DryRunOrderGateway mints its own user_order_id; just require presence.
+        self.assertTrue(all(item["user_order_id"] for item in response["data"]))

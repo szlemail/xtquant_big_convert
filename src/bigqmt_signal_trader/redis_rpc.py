@@ -405,7 +405,10 @@ class BigQmtRpcHandlers:
         allowed_methods=None,
         qmt_api=None,
         settle_orders_inline=False,
-        order_settle_timeout_seconds=3.0,
+        # QMT's order/trade queries read a LOCAL cache that refreshes 1-6s on
+        # counters without trade push (own API reference 1.5) — 3s used to
+        # declare live orders "not found" on the first settlement pass.
+        order_settle_timeout_seconds=8.0,
         quote_subscription_manager=None,
     ):
         self.account_id = str(account_id or "")
@@ -955,7 +958,11 @@ class BigQmtRpcHandlers:
             return "SELL"
         raise ValueError("action or order_type is required")
 
-    def _handle_submit_order(self, params):
+    def _submit_order_core(self, params):
+        """Validate + submit one order via the gateway. Returns (request, result).
+
+        Shared by the single-order RPC (which then settles) and the batch RPC
+        (which does not — see _handle_submit_orders_batch)."""
         if self.order_gateway is None:
             raise RuntimeError("order_gateway is not configured")
         price = params.get("price")
@@ -995,6 +1002,11 @@ class BigQmtRpcHandlers:
             pass
 
         result = self.order_gateway.submit(request)
+        self._last_server_error = ""
+        return request, result
+
+    def _handle_submit_order(self, params):
+        request, result = self._submit_order_core(params)
 
         # 委托后校验：确认委托是否真的进了系统。passorder 调用成功但委托没进
         # 系统时（静默失败），记录 server_error 让客户端知道。匹配严格按
@@ -1002,7 +1014,6 @@ class BigQmtRpcHandlers:
         # QMT 的委托号是异步分配的（passorder 无返回值），这里按唯一
         # user_order_id(remark) 精确匹配并回填 order_sys_id，避免客户端把
         # 「已提交但暂无委托号」误判为下单失败（issue #38）。
-        self._last_server_error = ""
 
         # Async callers opt out of waiting for the order id. MiniQMT's
         # order_stock_async returns a seq immediately and delivers the id through
@@ -1044,47 +1055,85 @@ class BigQmtRpcHandlers:
 
         MUST run on the main strategy thread -- get_trade_detail_data returns
         empty anywhere else.
+
+        A row that exists but has no order_sys_id yet is NOT settled while the
+        deadline is ahead: QMT assigns the id asynchronously, and settling
+        early answers the client with order_sys_id=None, which order_stock
+        reports as -1 -- an alive order read as failed, the classic
+        duplicate-order trap.
         """
         request = settlement.order_request
         settlement.attempts += 1
         try:
-            orders = self.order_gateway.query_orders(request.account_id, "") or []
-            by_remark = [
-                o for o in orders
-                if str(getattr(o, "user_order_id", "") or "").strip() == request.remark.strip()
-            ]
-            if by_remark:
-                sysid = str(getattr(by_remark[0], "order_sys_id", "") or "")
-                if sysid:
-                    try:
-                        settlement.result.order_sys_id = sysid
-                    except Exception:
-                        pass
-                return True
+            # Prefer the strict query: query_orders swallows errors into [],
+            # which makes "lookup failed" indistinguishable from "order absent"
+            # and would stamp the wrong diagnostic on the response.
+            strict = getattr(self.order_gateway, "query_orders_strict", None)
+            query = strict if callable(strict) else self.order_gateway.query_orders
+            orders = query(request.account_id, "") or []
+        except Exception:
             if not final:
-                # Not there yet. QMT assigns the id asynchronously, so an early
-                # miss is normal -- only a miss at the deadline is a real one.
+                # Retry: a failed lookup must not end the wait early.
                 return False
-            # Deadline reached with no remark match -> not in the system. Do NOT
-            # fall back to matching stock_code+action: order_tag is a unique id
-            # we generated, so a miss is always a real miss, while an unrelated
-            # order on the same stock and side (a manual one, or an earlier
-            # unfilled order) would silently suppress this warning and leave
-            # order_sys_id unfilled with no signal at all (issue #41).
+            # Deadline with a broken lookup: the order IS submitted, state
+            # unknown. Say so explicitly instead of pretending success.
             message = (
-                "passorder submitted but order not found in system "
-                "(stock=%s action=%s price=%.2f volume=%d, %d lookup(s)). "
-                "QMT may have silently rejected it (check price range / permissions)."
-                % (request.stock_code, request.action, request.price,
-                   request.volume, settlement.attempts)
+                "order submitted but settlement lookup kept failing "
+                "(stock=%s action=%s volume=%d, %d lookup(s)); order state "
+                "unknown -- query orders by user_order_id=%s before retrying"
+                % (request.stock_code, request.action, request.volume,
+                   settlement.attempts, request.remark)
             )
             settlement.server_error = message
             if inline:
                 self._last_server_error = message
             return True
-        except Exception:
-            # A failed lookup must not lose the order -- it is already submitted.
+        by_remark = [
+            o for o in orders
+            if str(getattr(o, "user_order_id", "") or "").strip() == request.remark.strip()
+        ]
+        if by_remark:
+            sysid = str(getattr(by_remark[0], "order_sys_id", "") or "")
+            if sysid:
+                try:
+                    settlement.result.order_sys_id = sysid
+                except Exception:
+                    pass
+                return True
+            if not final:
+                # Row present, id not assigned yet -- keep waiting for it.
+                return False
+            # Deadline: the order IS in the system; say the id is still pending
+            # rather than reporting an unknown failure.
+            try:
+                settlement.result.message = (
+                    "order found but order_sys_id not assigned before timeout; "
+                    "follow order callbacks / query by user_order_id=%s" % request.remark
+                )
+            except Exception:
+                pass
             return True
+        if not final:
+            # Not there yet. QMT assigns the id asynchronously, so an early
+            # miss is normal -- only a miss at the deadline is a real one.
+            return False
+        # Deadline reached with no remark match -> not in the system. Do NOT
+        # fall back to matching stock_code+action: order_tag is a unique id
+        # we generated, so a miss is always a real miss, while an unrelated
+        # order on the same stock and side (a manual one, or an earlier
+        # unfilled order) would silently suppress this warning and leave
+        # order_sys_id unfilled with no signal at all (issue #41).
+        message = (
+            "passorder submitted but order not found in system "
+            "(stock=%s action=%s price=%.2f volume=%d, %d lookup(s)). "
+            "QMT may have silently rejected it (check price range / permissions)."
+            % (request.stock_code, request.action, request.price,
+               request.volume, settlement.attempts)
+        )
+        settlement.server_error = message
+        if inline:
+            self._last_server_error = message
+        return True
 
     def _handle_submit_orders_batch(self, params):
         orders = params.get("orders") or []
@@ -1167,7 +1216,13 @@ class BigQmtRpcHandlers:
                 })
                 continue
             try:
-                result = self._handle_submit_order(item)
+                # Core submit only — do NOT route through _handle_submit_order:
+                # it parks a settlement in the single pending slot per call, so
+                # a batch of N left only the LAST order's settlement alive, and
+                # settling later replaced this whole list response with that one
+                # order's OrderSubmitResult. Ids arrive per-order through order
+                # callbacks / query_stock_orders keyed by user_order_id.
+                result = self._submit_order_core(item)[1]
                 response = {
                     "index": index,
                     "batch_id": batch_id,

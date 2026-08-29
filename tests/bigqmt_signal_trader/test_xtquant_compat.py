@@ -776,3 +776,45 @@ class MsTimetagStimeTest(unittest.TestCase):
         )
         # the MiniQMT-style time column carries real epoch ms, not None
         self.assertEqual(list(frame["time"]), [1784014200000, 1784014260000, 1784014320000])
+
+
+class OrderCallTimeoutTest(unittest.TestCase):
+    def _trader(self, timeout_seconds=6.0):
+        client = BigQmtRpcClient(account_id="acct", timeout_seconds=timeout_seconds)
+        trader = BigQmtXtTrader(account_id="acct")
+        trader.client = client
+        captured = {}
+
+        def call(method, params=None, account_id=None, timeout_seconds=None):
+            captured["method"] = method
+            captured["timeout"] = timeout_seconds
+            return {"order_sys_id": "sys-1"}
+
+        client.call = call
+        return trader, captured
+
+    def test_settling_order_call_outlives_server_settle_window(self):
+        trader, captured = self._trader(timeout_seconds=6.0)
+        acc = StockAccount("acct")
+        trader.order_stock_result(
+            acc, "600000.SH", STOCK_BUY, 100, FIX_PRICE, 10.0, "s", "r"
+        )
+        self.assertEqual(captured["method"], "order_stock")
+        self.assertGreaterEqual(captured["timeout"], 12.0)
+
+    def test_explicit_client_timeout_still_wins_if_larger(self):
+        trader, captured = self._trader(timeout_seconds=30.0)
+        acc = StockAccount("acct")
+        trader.order_stock_result(
+            acc, "600000.SH", STOCK_BUY, 100, FIX_PRICE, 10.0, "s", "r"
+        )
+        self.assertGreaterEqual(captured["timeout"], 30.0)
+
+    def test_no_settlement_uses_client_default(self):
+        trader, captured = self._trader(timeout_seconds=6.0)
+        acc = StockAccount("acct")
+        trader.order_stock_result(
+            acc, "600000.SH", STOCK_BUY, 100, FIX_PRICE, 10.0, "s", "r",
+            wait_settlement=False,
+        )
+        self.assertIsNone(captured["timeout"])

@@ -2457,10 +2457,20 @@ class BigQmtXtTrader:
             "strategy_name": strategy_name,
             "order_remark": user_order_id,
         }
+        rpc_timeout = None
         if not wait_settlement:
             payload["wait_settlement"] = False
+        else:
+            # The server parks the reply until QMT assigns the order id
+            # (default settle window 8s + adjust-tick granularity). The client
+            # timeout must outlive that wait, or a healthy order comes back as
+            # a client-side TimeoutError and invites a duplicate resubmit.
+            configured = getattr(self.client, "timeout_seconds", None)
+            rpc_timeout = max(12.0, float(configured) if configured else 0)
         try:
-            return self.client.call("order_stock", payload, account_id=account_id) or {}
+            return self.client.call(
+                "order_stock", payload, account_id=account_id, timeout_seconds=rpc_timeout
+            ) or {}
         except TimeoutError as exc:
             raise TimeoutError(
                 "order_stock rpc timeout; user_order_id=%s. Query orders/trades before retrying to avoid duplicate orders. %s"

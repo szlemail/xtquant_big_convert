@@ -460,7 +460,9 @@ def _build_rpc_service(context_info, app, config):
         # path; set rpc_settle_orders_inline=True only for a runtime with no
         # adjust drain to retry on.
         settle_orders_inline=_config_bool(rpc_config.get("settle_orders_inline"), False),
-        order_settle_timeout_seconds=float(rpc_config.get("order_settle_timeout_seconds", 3.0)),
+        # 8s covers QMT's 1-6s local-cache refresh for order queries; the
+        # client's order-call timeout floors at 12s so it outlives the wait.
+        order_settle_timeout_seconds=float(rpc_config.get("order_settle_timeout_seconds", 8.0)),
         quote_subscription_manager=quote_manager,
     )
     handlers.download_job_redis_client = response_redis_client or redis_client
