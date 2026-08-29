@@ -282,3 +282,112 @@ class WholeQuoteSessionTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReplayGuardTest(unittest.TestCase):
+    def test_replay_survives_rpc_failures(self):
+        calls = []
+
+        def rpc(method, params):
+            calls.append(method)
+            if len(calls) % 2 == 1:
+                raise ConnectionError("redis just came back")
+            return {}
+
+        session = WholeQuoteClientSession(
+            rpc_call=rpc, push_channel=FakePushChannel(), client_id="c"
+        )
+        session._subscriptions[1] = {"topic": "A", "callback": None, "codes": ["SH"]}
+        session._subscriptions[2] = {"topic": "B", "callback": None, "codes": ["SZ"]}
+        # Must not raise: replay runs exactly when rpc is most likely to fail.
+        session.replay_subscriptions()
+        self.assertEqual(calls.count("subscribe_whole_quote"), 2)
+
+
+class DeadSubscriberRevivalTest(unittest.TestCase):
+    def test_dead_subscriber_thread_is_restarted_on_sync(self):
+        class FlakyChannel:
+            def __init__(self):
+                self.starts = 0
+                self.stops = 0
+                self.alive = True
+
+            def start_subscriber(self, topics, on_msg):
+                self.starts += 1
+                self.alive = True
+
+            def stop(self):
+                self.stops += 1
+                self.alive = False
+
+            def is_alive(self):
+                return self.alive
+
+        channel = FlakyChannel()
+        session = WholeQuoteClientSession(
+            rpc_call=lambda m, p: {}, push_channel=channel, client_id="c"
+        )
+        session.subscribe_whole_quote(["SH"])
+        self.assertEqual(channel.starts, 1)
+
+        channel.alive = False  # subscriber thread died
+        session.subscribe_whole_quote(["SZ"])  # topic set changes anyway
+        self.assertEqual(channel.starts, 2)
+
+        channel.alive = False  # died again; now the SAME topic set
+        with session._lock:
+            session._sync_subscriber_locked()
+        self.assertEqual(channel.starts, 3, "dead thread must be revived")
+        self.assertTrue(channel.alive)
+
+    def test_live_subscriber_is_reused_when_topic_set_unchanged(self):
+        class StableChannel:
+            def __init__(self):
+                self.starts = 0
+
+            def start_subscriber(self, topics, on_msg):
+                self.starts += 1
+
+            def stop(self):
+                pass
+
+            def is_alive(self):
+                return True
+
+        channel = StableChannel()
+        session = WholeQuoteClientSession(
+            rpc_call=lambda m, p: {}, push_channel=channel, client_id="c"
+        )
+        session.subscribe_whole_quote(["SH"])
+        session.subscribe_whole_quote(["SH"])
+        self.assertEqual(channel.starts, 1)
+
+
+class HeartbeatSurvivesTest(unittest.TestCase):
+    def test_heartbeat_thread_keeps_running_when_rpc_always_raises(self):
+        class ExplodingRpc:
+            def __init__(self):
+                self.calls = 0
+
+            def __call__(self, method, params):
+                self.calls += 1
+                raise ConnectionError("down")
+
+        rpc = ExplodingRpc()
+        session = WholeQuoteClientSession(
+            rpc_call=rpc,
+            push_channel=FakePushChannel(),
+            client_id="c",
+            heartbeat_interval_seconds=0.02,
+        )
+        # Register directly: subscribing through the exploding rpc is not the
+        # point — the heartbeat must survive it once the sub exists.
+        session._subscriptions[1] = {"topic": "SH", "callback": None, "codes": ["SH"]}
+        session.start()
+        try:
+            deadline = time.time() + 1.0
+            while time.time() < deadline and rpc.calls < 5:
+                time.sleep(0.01)
+        finally:
+            session.stop()
+        self.assertGreaterEqual(rpc.calls, 5, "heartbeat died on rpc error")

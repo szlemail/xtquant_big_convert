@@ -188,3 +188,89 @@ class RedisPushChannelTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FlakyPubSub(FakePubSub):
+    """get_message raises the first N times, then behaves."""
+
+    def __init__(self, redis_client, failures):
+        super().__init__(redis_client)
+        self.failures = failures
+
+    def get_message(self, timeout=0.1):
+        if self.failures > 0:
+            self.failures -= 1
+            raise ConnectionError("redis went away")
+        return super().get_message(timeout=timeout)
+
+
+class FlakyRedis(FakeRedis):
+    def __init__(self, failures):
+        super().__init__()
+        self.failures = failures
+
+    def pubsub(self, ignore_subscribe_messages=True):
+        return FlakyPubSub(self, self.failures.pop(0) if self.failures else 0)
+
+
+class RedisPushChannelSelfHealTest(unittest.TestCase):
+    def test_get_message_error_reconnects_and_still_delivers(self):
+        # One transient redis error used to `break` out of the sub loop: the
+        # thread died silently and quotes stopped forever while keepalives
+        # kept succeeding. It must rebuild the pubsub and keep delivering.
+        redis_client = FlakyRedis(failures=[1])
+        channel = RedisQuotePushChannel(redis_client, account_id="acct")
+        received = []
+        started = threading.Event()
+        channel.start_subscriber(["SH"], lambda topic, data: received.append((topic, data)))
+        try:
+            deadline = time.time() + 5.0
+            while time.time() < deadline and not received:
+                redis_client.publish(channel._channel("SH"), json.dumps({"data": {"x": 1}}).encode("utf-8"))
+                time.sleep(0.02)
+        finally:
+            channel.stop()
+        self.assertTrue(received, "message never delivered after reconnect")
+
+    def test_subscribe_failure_is_retried(self):
+        redis_client = FlakyRedis(failures=[1])  # first pubsub() creation fails
+        redis_client.pubsub_error_once = True
+
+        class SubscribeFailsOnce(FlakyPubSub):
+            def __init__(self, redis_client, failures):
+                super().__init__(redis_client, failures)
+                self.redis_client = redis_client
+
+            def subscribe(self, *channels):
+                if getattr(self.redis_client, "pubsub_error_once", False):
+                    self.redis_client.pubsub_error_once = False
+                    raise ConnectionError("subscribe failed")
+                return super().subscribe(*channels)
+
+        original_pubsub = redis_client.pubsub
+
+        def pubsub(ignore_subscribe_messages=True):
+            return SubscribeFailsOnce(redis_client, 0)
+
+        redis_client.pubsub = pubsub
+        channel = RedisQuotePushChannel(redis_client, account_id="acct")
+        received = []
+        channel.start_subscriber(["SH"], lambda topic, data: received.append((topic, data)))
+        try:
+            deadline = time.time() + 5.0
+            while time.time() < deadline and not received:
+                redis_client.publish(channel._channel("SH"), json.dumps({"data": {"x": 1}}).encode("utf-8"))
+                time.sleep(0.02)
+        finally:
+            channel.stop()
+        self.assertTrue(received, "message never delivered after subscribe retry")
+
+    def test_is_alive_reflects_subscriber_thread(self):
+        channel = RedisQuotePushChannel(FakeRedis(), account_id="acct")
+        self.assertFalse(channel.is_alive())
+        channel.start_subscriber(["SH"], lambda topic, data: None)
+        try:
+            self.assertTrue(channel.is_alive())
+        finally:
+            channel.stop()
+        self.assertFalse(channel.is_alive())

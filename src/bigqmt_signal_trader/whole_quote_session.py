@@ -78,14 +78,22 @@ class WholeQuoteClientSession(object):
 
     def replay_subscriptions(self):
         """Re-send subscribe for every active sub_id (server restart recovery).
-        Idempotent on the server (keyed by client_id+combo), so replays are safe."""
+        Idempotent on the server (keyed by client_id+combo), so replays are safe.
+
+        Each replay is individually guarded: replay runs exactly when the
+        server/redis has just come back, which is when an RPC is most likely
+        to raise — and an uncaught raise here kills the heartbeat thread, which
+        stops keepalives and lets the server reap every subscription."""
         with self._lock:
             items = [(sid, dict(entry)) for sid, entry in self._subscriptions.items()]
         for sub_id, entry in items:
-            self._rpc(
-                "subscribe_whole_quote",
-                {"client_id": self.client_id, "sub_id": sub_id, "codes": entry["codes"]},
-            )
+            try:
+                self._rpc(
+                    "subscribe_whole_quote",
+                    {"client_id": self.client_id, "sub_id": sub_id, "codes": entry["codes"]},
+                )
+            except Exception as exc:
+                print("[bigqmt_quote_session] replay sub %s failed: %s" % (sub_id, exc))
 
     # -- heartbeat -------------------------------------------------------------
     def start(self):
@@ -113,43 +121,54 @@ class WholeQuoteClientSession(object):
         silence_rounds = 0
         prev_last_push = None
         while True:
-            with self._lock:
-                if not self._started:
-                    return
-                sub_ids = list(self._subscriptions.keys())
-                last_push = self._last_push_time
-            if not sub_ids:
-                time.sleep(self._heartbeat_interval)
-                continue
-            failures = 0
-            for sub_id in sub_ids:
-                try:
-                    self._rpc("quote_keepalive", {"client_id": self.client_id, "sub_id": sub_id})
-                except Exception:
-                    failures += 1
-            if failures:
-                consecutive_failures += 1
-            elif consecutive_failures >= 3:
-                # Server is back after a restart window: replay subscriptions so
-                # the restarted server re-creates the big-QMT subscriptions (its
-                # state is gone). Idempotent on the server, so replays are safe.
-                self.replay_subscriptions()
-                consecutive_failures = 0
-            else:
-                consecutive_failures = 0
-            # Push-silence detection: a server restart can survive with keepalive
-            # succeeding (the redis request queue buffers during the restart
-            # window) while the subscription table was reset, so pushes stop.
-            # Replay when no push arrived for several heartbeat rounds (also
-            # covers the case where the very first prime push never arrived).
-            if last_push != prev_last_push:
-                silence_rounds = 0  # a push arrived since the last round
-            else:
-                silence_rounds += 1
-            prev_last_push = last_push
-            if silence_rounds >= self._push_silence_replay_heartbeats:
-                self.replay_subscriptions()
-                silence_rounds = 0
+            try:
+                with self._lock:
+                    if not self._started:
+                        return
+                    sub_ids = list(self._subscriptions.keys())
+                    last_push = self._last_push_time
+                    # Liveness probe: if the push-channel subscriber thread died
+                    # (old builds exited on a transient redis/zmq error), nothing
+                    # else restarts it while the topic set is unchanged — quotes
+                    # would stop silently while keepalives keep succeeding.
+                    self._sync_subscriber_locked()
+                if not sub_ids:
+                    time.sleep(self._heartbeat_interval)
+                    continue
+                failures = 0
+                for sub_id in sub_ids:
+                    try:
+                        self._rpc("quote_keepalive", {"client_id": self.client_id, "sub_id": sub_id})
+                    except Exception:
+                        failures += 1
+                if failures:
+                    consecutive_failures += 1
+                elif consecutive_failures >= 3:
+                    # Server is back after a restart window: replay subscriptions so
+                    # the restarted server re-creates the big-QMT subscriptions (its
+                    # state is gone). Idempotent on the server, so replays are safe.
+                    self.replay_subscriptions()
+                    consecutive_failures = 0
+                else:
+                    consecutive_failures = 0
+                # Push-silence detection: a server restart can survive with keepalive
+                # succeeding (the redis request queue buffers during the restart
+                # window) while the subscription table was reset, so pushes stop.
+                # Replay when no push arrived for several heartbeat rounds (also
+                # covers the case where the very first prime push never arrived).
+                if last_push != prev_last_push:
+                    silence_rounds = 0  # a push arrived since the last round
+                else:
+                    silence_rounds += 1
+                prev_last_push = last_push
+                if silence_rounds >= self._push_silence_replay_heartbeats:
+                    self.replay_subscriptions()
+                    silence_rounds = 0
+            except Exception as exc:
+                # The heartbeat thread must survive anything a single round can
+                # raise: dying here stops keepalives, and the server reaps all
+                # subscriptions ~30s later.
+                print("[bigqmt_quote_session] heartbeat round failed: %s" % exc)
             time.sleep(self._heartbeat_interval)
 
     # -- push routing ------------------------------------------------------------
@@ -174,11 +193,29 @@ class WholeQuoteClientSession(object):
         """(Re)start the push-channel subscriber to cover exactly the active
         topics. Reuses an existing subscriber when the topic set is unchanged;
         stops it before restarting when the set changed. No-op when nothing is
-        subscribed (and stops the running subscriber in that case)."""
+        subscribed (and stops the running subscriber in that case).
+
+        Also restarts a subscriber whose thread has died (older channel builds
+        exited their loop on a transient error). ``is_alive`` is looked up
+        defensively so test fakes without it keep working."""
         topics = sorted({entry["topic"] for entry in self._subscriptions.values()})
         active = frozenset(topics)
         if active == self._subscribed_topics:
-            return
+            if self._subscriber_active:
+                is_alive = getattr(self._channel, "is_alive", None)
+                if callable(is_alive) and not is_alive():
+                    # Thread died: fall through to a restart by clearing the
+                    # recorded state below.
+                    try:
+                        self._channel.stop()
+                    except Exception:
+                        pass
+                    self._subscriber_active = False
+                    self._subscribed_topics = frozenset()
+                else:
+                    return
+            else:
+                return
         if not active:
             if self._subscriber_active:
                 try:

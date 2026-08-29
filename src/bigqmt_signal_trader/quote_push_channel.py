@@ -18,6 +18,7 @@ channel stays usable without the optional dependency.
 
 import json
 import threading
+import time
 
 try:
     import msgpack
@@ -148,8 +149,14 @@ class ZmqQuotePushChannel(QuotePushChannel):
             while self._running:
                 try:
                     events = dict(poller.poll(200))
-                except Exception:
-                    break
+                except Exception as exc:
+                    # A transient poll failure must not kill the subscriber thread:
+                    # nothing else restarts it while the topic set is unchanged, so
+                    # an exit here means quotes stop silently. Back off and retry
+                    # until stop() flips _running.
+                    print("%s zmq poll failed, retrying: %s" % (self.print_prefix, exc))
+                    time.sleep(0.2)
+                    continue
                 if sub not in events:
                     continue
                 try:
@@ -170,6 +177,11 @@ class ZmqQuotePushChannel(QuotePushChannel):
                 sub.close(linger=0)
             except Exception:
                 pass
+
+    def is_alive(self):
+        """True while the subscriber thread is running (for liveness checks)."""
+        thread = self._sub_thread
+        return bool(thread is not None and thread.is_alive())
 
     def stop(self):
         # Signal the sub thread to exit and let IT close its own socket (see
@@ -228,21 +240,47 @@ class RedisQuotePushChannel(QuotePushChannel):
 
     def _sub_loop(self, topics, on_msg):
         # The pubsub connection is owned by THIS thread and closed HERE so a
-        # concurrent stop() can't close it out from under us.
-        pubsub = self.redis.pubsub(ignore_subscribe_messages=True)
-        self._pubsub = pubsub
-        channels = [self._channel(topic) for topic in topics]
-        try:
-            pubsub.subscribe(*channels)
-        except Exception as exc:
-            print("%s redis subscribe failed: %s" % (self.print_prefix, exc))
-            return
+        # concurrent stop() can't close it out from under us. A transient
+        # redis failure must NOT end the thread: nothing restarts it while the
+        # topic set is unchanged, so an exit here means quotes stop silently.
+        # Rebuild the pubsub connection with a capped backoff instead.
+        backoff_seconds = 0.2
+        pubsub = None
         try:
             while self._running:
+                if pubsub is None:
+                    try:
+                        pubsub = self.redis.pubsub(ignore_subscribe_messages=True)
+                        pubsub.subscribe(*[self._channel(topic) for topic in topics])
+                        self._pubsub = pubsub
+                        backoff_seconds = 0.2
+                    except Exception as exc:
+                        print("%s redis subscribe failed, retrying: %s"
+                              % (self.print_prefix, exc))
+                        if pubsub is not None:
+                            try:
+                                pubsub.close()
+                            except Exception:
+                                pass
+                            pubsub = None
+                            self._pubsub = None
+                        time.sleep(backoff_seconds)
+                        backoff_seconds = min(backoff_seconds * 2, 5.0)
+                        continue
                 try:
                     message = pubsub.get_message(timeout=0.2)
-                except Exception:
-                    break
+                except Exception as exc:
+                    print("%s redis get_message failed, reconnecting: %s"
+                          % (self.print_prefix, exc))
+                    try:
+                        pubsub.close()
+                    except Exception:
+                        pass
+                    pubsub = None
+                    self._pubsub = None
+                    time.sleep(backoff_seconds)
+                    backoff_seconds = min(backoff_seconds * 2, 5.0)
+                    continue
                 if not message or message.get("type") != "message":
                     continue
                 channel = message.get("channel")
@@ -256,10 +294,16 @@ class RedisQuotePushChannel(QuotePushChannel):
                 except Exception as exc:
                     print("%s subscriber callback failed: %s" % (self.print_prefix, exc))
         finally:
-            try:
-                pubsub.close()
-            except Exception:
-                pass
+            if pubsub is not None:
+                try:
+                    pubsub.close()
+                except Exception:
+                    pass
+
+    def is_alive(self):
+        """True while the subscriber thread is running (for liveness checks)."""
+        thread = self._thread
+        return bool(thread is not None and thread.is_alive())
 
     def stop(self):
         self._running = False
