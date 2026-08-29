@@ -311,3 +311,18 @@ class SingleFileInjectionTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ZmqPortMirrorTest(unittest.TestCase):
+    def test_wizard_port_matches_transport_derivation(self):
+        # The wizard writes the client's connect address from this helper; a
+        # drifted formula meant wizard zmq clients pointed at a dead port.
+        from bigqmt_signal_trader.init_config import _zmq_default_port
+        from bigqmt_signal_trader.transports.zmq_transport import _default_zmq_port
+
+        for account in ("62004819", "8889202673", "12345", "", "abc123"):
+            self.assertEqual(
+                _zmq_default_port(account),
+                _default_zmq_port(account),
+                "port mismatch for account %r" % account,
+            )

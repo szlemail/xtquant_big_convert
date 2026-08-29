@@ -70,11 +70,15 @@ DEFAULTS = {
 def _zmq_default_port(account_id):
     """The zmq transport derives its port from the account id when no explicit
     address is configured; mirror that so the client block points somewhere
-    real instead of a placeholder."""
-    digits = "".join(character for character in str(account_id) if character.isdigit())
-    if not digits:
-        return 15563
-    return 15000 + (int(digits) % 1000)
+    real instead of a placeholder.
+
+    Must reuse the transport's own derivation: this mirror used to re-implement
+    it with a drifted formula (15000 + digits%1000 vs the real 15560 +
+    digits%100), so every wizard-generated zmq client config pointed at a port
+    the server never binds and could never connect."""
+    from .transports.zmq_transport import _default_zmq_port
+
+    return _default_zmq_port(account_id)
 
 
 def render_server_config(answers):
