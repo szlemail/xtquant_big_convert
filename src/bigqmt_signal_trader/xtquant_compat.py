@@ -1459,6 +1459,66 @@ class BigQmtXtData:
     def download_history_data(self, stock_code, period, start_time="", end_time="", incrementally=None, dividend_type="none"):
         return self.download_history_data2([stock_code], period, start_time, end_time, dividend_type=dividend_type)
 
+    # ------------------------------------------------------------------
+    # 异步下载任务（服务端 download_jobs 已有；此前 shim 转发到不存在的
+    # 方法上，一调就 AttributeError）。wait_download 在客户端轮询状态，
+    # 不调服务端的 wait_download——那个 handler 会在处理线程上阻塞至
+    # 600s，冻结整个 RPC 泵。
+    # ------------------------------------------------------------------
+
+    def submit_download_history_data2(self, stock_list, period, start_time="", end_time="", incrementally=None, chunk_size=None, job_ttl_seconds=None):
+        return self._call(
+            "submit_download_history_data2",
+            stock_list=[str(c) for c in (stock_list or [])],
+            period=period,
+            start_time=start_time,
+            end_time=end_time,
+            incrementally=incrementally,
+            chunk_size=chunk_size,
+            job_ttl_seconds=job_ttl_seconds,
+        )
+
+    def submit_download_history_data(self, stock_code, period, start_time="", end_time="", incrementally=None):
+        return self._call(
+            "submit_download_history_data",
+            stock_code=stock_code,
+            period=period,
+            start_time=start_time,
+            end_time=end_time,
+            incrementally=incrementally,
+        )
+
+    def get_download_status(self, job_id):
+        return self._call("get_download_status", job_id=job_id)
+
+    def wait_download(self, job_id, timeout=None, poll_interval=None, callback=None):
+        """Poll a download job client-side until it finishes or times out.
+
+        Returns the final job status dict (state DONE/FAILED/EXPIRED or the
+        last observed status on timeout). Mirrors xtdata.wait_download's
+        shape; ``callback`` (optional) receives each intermediate status.
+        """
+        deadline = (time.time() + float(timeout)) if timeout is not None else None
+        interval = float(poll_interval) if poll_interval is not None else 0.5
+        status = None
+        while True:
+            status = self.get_download_status(job_id)
+            if callback is not None:
+                try:
+                    callback(status)
+                except Exception:
+                    pass
+            state = str((status or {}).get("state") or "").upper()
+            if state in ("DONE", "FAILED", "EXPIRED"):
+                return status
+            if deadline is not None and time.time() >= deadline:
+                return status
+            time.sleep(max(0.05, interval))
+
+    def get_instrument_detail_list(self, stock_list):
+        """Fetch instrument details for a list of codes ({code: detail})."""
+        return self._call("get_instrument_detail_list", stock_list=[str(c) for c in (stock_list or [])]) or {}
+
     def local_cache_stats(self):
         """Return (cached files, periods) for the client-side local cache."""
         cache = self._local_cache()

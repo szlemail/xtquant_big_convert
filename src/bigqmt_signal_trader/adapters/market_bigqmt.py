@@ -495,6 +495,24 @@ class BigQmtMarketDataProvider:
         data = self.context_info.get_instrumentdetail(normalized)
         return data or {}
 
+    def get_instrument_detail_list(self, stock_list):
+        """Per-code instrument details, keyed by the caller's original spelling.
+
+        Mirrors xtdata.get_instrument_detail_list(stock_list) -> {code: detail}.
+        Keys echo the request so lookups like details[stock_id] hit regardless
+        of the normalization applied for the ContextInfo call."""
+        result = {}
+        for code in _as_list(stock_list):
+            text = str(code or "").strip()
+            if not text:
+                continue
+            try:
+                result[text] = self.get_instrument(text) or {}
+            except Exception:
+                result[text] = {}
+        return result
+
+
     def get_instrument_type(self, code, variety_list=None):
         if hasattr(self.context_info, "get_instrument_type"):
             return self.context_info.get_instrument_type(code, variety_list)

@@ -818,3 +818,70 @@ class OrderCallTimeoutTest(unittest.TestCase):
             wait_settlement=False,
         )
         self.assertIsNone(captured["timeout"])
+
+
+class DownloadJobApiTest(unittest.TestCase):
+    """The shim forwards these four names; they must exist and stay off the
+    server's blocking wait_download handler."""
+
+    def _xtdata(self, calls):
+        client = BigQmtRpcClient(account_id="acct")
+        client.call = lambda method, params=None, account_id=None, timeout_seconds=None: (
+            calls.append((method, dict(params or {}))) or {"job_id": "job-1", "state": "PENDING"}
+        )
+        data = BigQmtXtData(client)
+        return data
+
+    def test_submit_download_history_data2_params(self):
+        calls = []
+        data = self._xtdata(calls)
+        job = data.submit_download_history_data2(
+            ["600000.SH"], "5m", "20260801", "20260829", incrementally=True, chunk_size=10
+        )
+        self.assertEqual(job["job_id"], "job-1")
+        method, params = calls[-1]
+        self.assertEqual(method, "submit_download_history_data2")
+        self.assertEqual(params["stock_list"], ["600000.SH"])
+        self.assertEqual(params["incrementally"], True)
+        self.assertEqual(params["chunk_size"], 10)
+
+    def test_submit_download_history_data_params(self):
+        calls = []
+        data = self._xtdata(calls)
+        data.submit_download_history_data("600000.SH", "1d", "20260801", "20260829")
+        method, params = calls[-1]
+        self.assertEqual(method, "submit_download_history_data")
+        self.assertEqual(params["stock_code"], "600000.SH")
+
+    def test_get_download_status(self):
+        calls = []
+        data = self._xtdata(calls)
+        data.get_download_status("job-1")
+        self.assertEqual(calls[-1][0], "get_download_status")
+        self.assertEqual(calls[-1][1]["job_id"], "job-1")
+
+    def test_wait_download_polls_client_side_until_done(self):
+        states = [{"state": "PENDING"}, {"state": "PENDING"}, {"state": "DONE", "done": 5, "total": 5}]
+        client = BigQmtRpcClient(account_id="acct")
+        client.call = lambda method, params=None, account_id=None, timeout_seconds=None: states.pop(0)
+        data = BigQmtXtData(client)
+        seen = []
+        status = data.wait_download("job-1", timeout=5.0, poll_interval=0.01, callback=seen.append)
+        self.assertEqual(status["state"], "DONE")
+        self.assertEqual(len(seen), 3)
+        # never calls the server-side blocking wait_download
+        self.assertEqual([s["state"] for s in seen], ["PENDING", "PENDING", "DONE"])
+
+    def test_get_instrument_detail_list(self):
+        calls = []
+        data = self._xtdata(calls)
+        client = data.client
+        client.call = lambda method, params=None, account_id=None, timeout_seconds=None: (
+            calls.append((method, dict(params or {})))
+            or {"600000.SH": {"InstrumentName": "PF Bank"}}
+        )
+        out = data.get_instrument_detail_list(["600000.SH", "000001.SZ"])
+        self.assertEqual(out["600000.SH"]["InstrumentName"], "PF Bank")
+        self.assertEqual(calls[-1][0], "get_instrument_detail_list")
+        self.assertEqual(calls[-1][1]["stock_list"], ["600000.SH", "000001.SZ"])
+

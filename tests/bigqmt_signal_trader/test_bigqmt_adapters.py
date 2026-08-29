@@ -557,3 +557,54 @@ class TradingDateNormalizationTest(unittest.TestCase):
         holidays = provider._holidays_from_trading_calendar(years_back=0)
         self.assertNotIn("20260713", holidays)
         self.assertNotIn("20260714", holidays)
+
+
+class InstrumentDetailListTest(unittest.TestCase):
+    def test_provider_returns_details_keyed_by_caller_spelling(self):
+        class DetailContext:
+            def get_instrumentdetail(self, code):
+                assert code == "600000.SH", code
+                return {"InstrumentName": "PF Bank", "InstrumentStatus": 0}
+
+        provider = BigQmtMarketDataProvider(DetailContext())
+        out = provider.get_instrument_detail_list(["600000", "600000.SH"])
+        # bare code normalized for the call, but the response keeps the
+        # caller's keys so downstream lookups by original spelling hit
+        self.assertEqual(out["600000"]["InstrumentName"], "PF Bank")
+        self.assertEqual(out["600000.SH"]["InstrumentName"], "PF Bank")
+
+    def test_provider_skips_broken_codes_without_losing_others(self):
+        class DetailContext:
+            def get_instrumentdetail(self, code):
+                if code == "000001.SZ":
+                    raise RuntimeError("no detail")
+                return {"InstrumentName": "PF Bank"}
+
+        provider = BigQmtMarketDataProvider(DetailContext())
+        out = provider.get_instrument_detail_list(["000001.SZ", "600000.SH"])
+        self.assertEqual(out["000001.SZ"], {})
+        self.assertEqual(out["600000.SH"]["InstrumentName"], "PF Bank")
+
+
+class InstrumentDetailListRpcTest(unittest.TestCase):
+    def test_method_is_whitelisted_and_routed_to_market_data(self):
+        from bigqmt_signal_trader.redis_rpc import MARKET_DATA_METHODS, READ_METHODS
+
+        self.assertIn("get_instrument_detail_list", MARKET_DATA_METHODS)
+        self.assertIn("get_instrument_detail_list", READ_METHODS)
+
+    def test_handle_routes_to_provider(self):
+        from bigqmt_signal_trader.redis_rpc import BigQmtRpcHandlers
+
+        class Provider:
+            def get_instrument_detail_list(self, stock_list):
+                return {code: {"InstrumentName": "x"} for code in stock_list}
+
+        handlers = BigQmtRpcHandlers(
+            account_id="acct", market_data=Provider(),
+            position_provider=None, allow_order_methods=False,
+        )
+        out = handlers.handle(
+            "get_instrument_detail_list", {"stock_list": ["600000.SH"]}
+        )
+        self.assertEqual(out, {"600000.SH": {"InstrumentName": "x"}})
