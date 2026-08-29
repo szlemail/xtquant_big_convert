@@ -122,7 +122,11 @@ def submit_download_job(
     redis_client.setex(job_key(account_id, job_id), ttl, _enc(json.dumps(job, ensure_ascii=False)))
     redis_client.rpush(queue_key(account_id), _enc(job_id))
     try:
-        redis_client.expire(queue_key(account_id), ttl)
+        # 队列是共享的：一个短 ttl 的新任务不该把队列里还在排队的长 ttl
+        # 任务连带削短，只在能延长时才刷新（-2=不存在，-1=永不过期则不动）。
+        current_ttl = int(redis_client.ttl(queue_key(account_id)))
+        if current_ttl == -2 or 0 <= current_ttl < ttl:
+            redis_client.expire(queue_key(account_id), ttl)
     except Exception:
         pass
     return job

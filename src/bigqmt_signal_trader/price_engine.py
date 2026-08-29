@@ -5,7 +5,9 @@ from .code_utils import normalize_stock_code
 
 def _price_precision(stock_code):
     pure = normalize_stock_code(stock_code).split(".")[0]
-    return 3 if pure.startswith(("15", "16", "51", "52")) else 2
+    # 三位小数品种：深/沪 ETF（15/16/51/52/56/58）、可转债（11 沪 / 12 深）。
+    # 与 market_bigqmt.get_instrument_type 的 etf 前缀口径保持一致（56/58 同为 ETF）。
+    return 3 if pure.startswith(("15", "16", "51", "52", "56", "58", "11", "12")) else 2
 
 
 def _second_level(values):

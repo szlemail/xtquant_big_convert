@@ -37,5 +37,21 @@ class PriceEngineTest(unittest.TestCase):
         self.assertEqual(price, 9.98)
 
 
+class PricePrecisionTest(unittest.TestCase):
+    def test_three_decimal_instruments(self):
+        from bigqmt_signal_trader.price_engine import _price_precision
+
+        # ETF: 15/16 (深), 51/52/56/58 (沪)；可转债: 11 (沪) / 12 (深)。
+        for code in ("159915.SZ", "162411.SZ", "510300.SH", "588000.SH",
+                     "560010.SH", "582000.SH", "113050.SH", "123088.SZ"):
+            self.assertEqual(_price_precision(code), 3, code)
+
+    def test_two_decimal_stocks(self):
+        from bigqmt_signal_trader.price_engine import _price_precision
+
+        for code in ("600000.SH", "000001.SZ", "300750.SZ", "688981.SH"):
+            self.assertEqual(_price_precision(code), 2, code)
+
+
 if __name__ == "__main__":
     unittest.main()

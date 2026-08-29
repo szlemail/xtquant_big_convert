@@ -457,7 +457,9 @@ def normalize_trade_event(trade, account_id=""):
         "volume": _attr(trade, ["m_nVolume", "volume", "traded_volume"]),
         "price": _attr(trade, ["m_dPrice", "price", "traded_price"]),
         "amount": _attr(trade, ["m_dTradeAmount", "amount"]),
-        "commission": _attr(trade, ["m_dComssion", "m_dCommission", "commission"]),
+        # 旧版 QMT 的拼写是单 s 的 m_dComission（见 API 参考 3.11 Deal 表）；
+        # m_dComssion 双 s 谁都匹配不上，属无效猜测字段。
+        "commission": _attr(trade, ["m_dCommission", "m_dComission", "m_dComssion", "commission"]),
         "direction": direction,
         "action": _action_from_direction(direction),
         "offset_flag": _attr(trade, ["m_nOffsetFlag", "offset_flag"]),

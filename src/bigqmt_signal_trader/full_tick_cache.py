@@ -97,12 +97,17 @@ def write_full_tick_cache(redis_client, account_id, codes, data, cache_ttl_secon
     normalized = normalize_full_tick_codes(codes)
     request_id = full_tick_request_id(normalized)
     now = time.time()
+    # 空快照不落盘：QMT 对这些代码没有行情（代码错/未订阅成功）时写入 {}，
+    # 会被读侧当成"新鲜的有效数据"，TTL 内一直返回空且不再走活体 RPC 兜底。
+    # 跳过写入让 demand 保持活跃，下轮刷新重试；读侧同样把 {} 当 miss。
+    if not data:
+        return None
     payload = {
         "request_id": request_id,
         "codes": normalized,
         "updated_at_ts": now,
         "updated_at": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now)),
-        "data": data or {},
+        "data": data,
     }
     key = full_tick_cache_key(account_id, request_id=request_id)
     ttl = int(max(1, float(cache_ttl_seconds)))
@@ -124,7 +129,8 @@ def read_full_tick_cache(redis_client, account_id, codes, max_age_seconds=10):
     if time.time() - updated_at > float(max_age_seconds):
         return None
     data = snapshot.get("data")
-    return data if isinstance(data, dict) else None
+    # {} 视为 miss：兼容仍会写空快照的旧服务端，让调用方继续等或走 RPC 兜底。
+    return data if isinstance(data, dict) and data else None
 
 
 def wait_full_tick_cache(redis_client, account_id, codes, max_age_seconds=10, wait_seconds=3.5, poll_interval_seconds=0.2):

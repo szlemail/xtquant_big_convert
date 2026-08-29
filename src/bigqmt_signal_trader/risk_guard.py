@@ -25,8 +25,18 @@ def build_trade_volume(signal: TradeSignal, positions):
             raw_volume = min(int(signal.amount), int(position.available))
             sell_all = raw_volume == int(position.available)
         else:
-            pct = float(signal.percentage or 100)
-            raw_volume = int(int(position.available) * pct / 100.0)
+            # percentage=0 must mean "sell nothing", not the 100 that
+            # ``0 or 100`` used to coerce it into -- that turned an explicit
+            # no-op into a full-position sell.
+            if signal.percentage is None:
+                pct = 100.0
+            else:
+                pct = float(signal.percentage)
+                if pct <= 0:
+                    return RiskDecision(False, "invalid_percentage", stock_code=code)
+            # Clamp like the amount branch: percentage > 100 can never sell
+            # more than the available position.
+            raw_volume = min(int(int(position.available) * pct / 100.0), int(position.available))
             sell_all = pct >= 100
         volume = round_sell_volume(code, raw_volume, sell_all=sell_all)
         if volume <= 0:

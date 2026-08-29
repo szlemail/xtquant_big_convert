@@ -179,7 +179,9 @@ METHOD_ALIASES = {
 
 BUY_ORDER_TYPES = {"23", "STOCK_BUY", "BUY", "B"}
 SELL_ORDER_TYPES = {"24", "STOCK_SELL", "SELL", "S"}
-CANCELABLE_ORDER_STATUSES = {"50", "55"}
+# 49 待报 / 50 已报 / 55 部成 都还未终态且可撤（10.9 enum_EEntrustStatus）。
+# 49 不能漏：刚提交、还没报到柜台的委托恰恰是最需要抢撤的窗口。
+CANCELABLE_ORDER_STATUSES = {"49", "50", "55"}
 SAFE_B64_PREFIX = "b64s:"
 SAFE_B64_DIGIT_ENCODE = str.maketrans("0123456789", "!#$%&()*~?")
 SAFE_B64_DIGIT_DECODE = str.maketrans("!#$%&()*~?", "0123456789")
@@ -314,13 +316,15 @@ def to_jsonable(value):
         if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
             return None
         return value
-    if isinstance(value, (_dt.datetime, _dt.date)):
-        return value.strftime("%Y-%m-%d %H:%M:%S")
+    # pandas.Timestamp 是 datetime 的子类，必须放在 datetime 分支之前，
+    # 否则 strftime 把亚秒截掉，下面的 isoformat 分支永远走不到。
     if hasattr(value, "isoformat") and value.__class__.__module__.startswith("pandas"):
         try:
             return value.isoformat()
         except Exception:
             return str(value)
+    if isinstance(value, (_dt.datetime, _dt.date)):
+        return value.strftime("%Y-%m-%d %H:%M:%S")
     if hasattr(value, "to_dict") and hasattr(value, "columns") and hasattr(value, "index"):
         try:
             frame = value.reset_index()
@@ -914,9 +918,13 @@ class BigQmtRpcHandlers:
         if func is not None:
             try:
                 # Try with a no-op callback first (some QMT builds require it);
-                # fall back to 4-arg call if that raises TypeError.
+                # fall back to 4-arg call if that raises TypeError. The callback
+                # MUST go by keyword: xtdata builds differ on whether the 5th
+                # positional is ``callback`` or ``incrementally``, and a positional
+                # lambda landing in ``incrementally`` would silently switch the
+                # download to "from local last bar only", never backfilling gaps.
                 try:
-                    result = func(stock_list, period, start_time, end_time, lambda data: None)
+                    result = func(stock_list, period, start_time, end_time, callback=lambda data: None)
                 except TypeError:
                     result = func(stock_list, period, start_time, end_time)
                 return bool(result) if result is not None else True

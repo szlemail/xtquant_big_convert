@@ -26,6 +26,7 @@ The split matters. Per the official docs and the ContextInfo IDE stub
 This module does not make trading decisions.
 """
 
+import datetime as _dt
 import importlib
 import importlib.util
 
@@ -79,6 +80,33 @@ def _raw_market_data_payload(payload, field_list, stock_list):
 
 _NATIVE_XTDATA = None  # cached native xtdata SDK module (None = not yet tried)
 _NATIVE_XTDATA_UNAVAILABLE = object()  # sentinel: looked, not importable
+
+# QMT bar/trading-date labels are China local time (UTC+8) regardless of the
+# host machine's timezone, so ms→date conversion must pin the offset.
+_CHINA_TZ = _dt.timezone(_dt.timedelta(hours=8))
+
+
+def _normalize_trading_date(value):
+    """Coerce a trading-date entry to a 'YYYYMMDD' string, or None.
+
+    get_trading_dates answers either 'YYYYMMDD' strings or millisecond
+    timestamps depending on the build/path (see get_market_last_trade_date).
+    Anything that can't be understood returns None so callers can drop it
+    instead of comparing mismatched formats (which marked every weekday a
+    holiday).
+    """
+    import datetime as _datetime
+
+    if isinstance(value, (int, float)) and value > 0:
+        seconds = float(value) / 1000.0 if value >= 1e11 else float(value)
+        try:
+            return _datetime.datetime.fromtimestamp(seconds, _CHINA_TZ).strftime("%Y%m%d")
+        except (OverflowError, OSError, ValueError):
+            return None
+    digits = "".join(ch for ch in str(value or "") if ch.isdigit())
+    if len(digits) >= 8:
+        return digits[:8]
+    return None
 
 
 # MiniQMT table_list names -> Big QMT financial table names (issue #52).
@@ -646,7 +674,14 @@ class BigQmtMarketDataProvider:
         import datetime
 
         try:
-            trading = set(str(d) for d in (self.get_trading_dates("SH", "", "", -1) or []))
+            trading = set(
+                date
+                for date in (
+                    _normalize_trading_date(d)
+                    for d in (self.get_trading_dates("SH", "", "", -1) or [])
+                )
+                if date
+            )
         except Exception:
             return []
         today = datetime.date.today()
@@ -786,11 +821,9 @@ class BigQmtMarketDataProvider:
             dates = []
         if not dates:
             return None
-        # xtdata returns millisecond timestamps (long list); take the last one.
-        try:
-            return dates[-1]
-        except Exception:
-            return None
+        # xtdata returns millisecond timestamps; the documented contract is a
+        # 'YYYYMMDD' string, so normalize whichever form arrives.
+        return _normalize_trading_date(dates[-1])
 
     def call_formula(self, formula_name, stock_code, period, start_time="", end_time="", count=-1, dividend_type=None, extend_param=None):
         return self._call_context(

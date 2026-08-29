@@ -517,3 +517,43 @@ class UnparsableRowIsolationTest(unittest.TestCase):
         self.assertEqual(output.count("skipping unparsable"), 1)
         self.assertIn("rb2401", output)
         self.assertIn("SHFE", output)
+
+
+class TradingDateNormalizationTest(unittest.TestCase):
+    """get_trading_dates answers ms timestamps on some builds and 'YYYYMMDD'
+    strings on others; everything downstream must see one format."""
+
+    @staticmethod
+    def _provider_with_dates(dates):
+        class Context:
+            def get_trading_dates(self, market, start_time="", end_time="", count=-1):
+                return list(dates)
+
+        return BigQmtMarketDataProvider(Context())
+
+    def test_normalize_trading_date_handles_both_formats(self):
+        from bigqmt_signal_trader.adapters.market_bigqmt import _normalize_trading_date
+
+        ms = 1784014200000  # 2026-07-14 (UTC+8)
+        self.assertEqual(_normalize_trading_date(ms), "20260714")
+        self.assertEqual(_normalize_trading_date("20260714"), "20260714")
+        self.assertEqual(_normalize_trading_date("2026-07-14"), "20260714")
+        self.assertIsNone(_normalize_trading_date("junk"))
+        self.assertIsNone(_normalize_trading_date(None))
+
+    def test_last_trade_date_returns_yyyymmdd_from_ms(self):
+        provider = self._provider_with_dates([1784014200000])
+        self.assertEqual(provider.get_market_last_trade_date("SH"), "20260714")
+
+    def test_last_trade_date_passthrough_yyyymmdd(self):
+        provider = self._provider_with_dates(["20260714"])
+        self.assertEqual(provider.get_market_last_trade_date("SH"), "20260714")
+
+    def test_holidays_from_ms_timestamps_do_not_mark_every_weekday(self):
+        # 2026-07-13 (Mon) and 2026-07-14 (Tue) as ms stamps: only the weekend
+        # days in the walked window may appear as holidays — never a weekday
+        # that is in the trading set.
+        provider = self._provider_with_dates([1783927800000, 1784014200000])
+        holidays = provider._holidays_from_trading_calendar(years_back=0)
+        self.assertNotIn("20260713", holidays)
+        self.assertNotIn("20260714", holidays)

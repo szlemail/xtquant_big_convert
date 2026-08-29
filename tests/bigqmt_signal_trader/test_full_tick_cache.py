@@ -12,6 +12,7 @@ from bigqmt_signal_trader.full_tick_cache import (
     read_full_tick_cache,
     refresh_full_tick_cache,
     request_full_tick_cache,
+    write_full_tick_cache,
 )
 
 
@@ -108,6 +109,41 @@ class FullTickCacheTest(unittest.TestCase):
 
         self.assertEqual(refreshed, 1)
         self.assertEqual(context.calls, [["SH", "SZ"]])
+
+    def test_empty_snapshot_is_not_written(self):
+        # QMT returning {} for the codes must not become a "fresh" cache entry
+        # that blocks the live-RPC fallback for a whole TTL window.
+        r = FakeRedis()
+        written = write_full_tick_cache(r, "acct", ["600000.SH"], {}, cache_ttl_seconds=10)
+        self.assertIsNone(written)
+        key = "bigqmt:fulltick:acct:%s" % full_tick_request_id(["600000.SH"])
+        self.assertNotIn(key, r.kv)
+
+    def test_empty_snapshot_read_is_a_miss(self):
+        # Backward guard: an older server may still publish {} snapshots; the
+        # reader must treat them as a miss so callers fall back / keep waiting.
+        r = FakeRedis()
+        import time as _time
+
+        r.kv["bigqmt:fulltick:acct:%s" % full_tick_request_id(["600000.SH"])] = (
+            __import__("bigqmt_signal_trader.full_tick_cache", fromlist=["_dump_snapshot"])
+            ._dump_snapshot(
+                {
+                    "request_id": full_tick_request_id(["600000.SH"]),
+                    "codes": ["600000.SH"],
+                    "updated_at_ts": _time.time(),
+                    "updated_at": "now",
+                    "data": {},
+                }
+            )
+        )
+        self.assertIsNone(read_full_tick_cache(r, "acct", ["600000.SH"]))
+
+    def test_non_empty_snapshot_read_still_hits(self):
+        r = FakeRedis()
+        write_full_tick_cache(r, "acct", ["600000.SH"], {"600000.SH": {"lastPrice": 1.0}})
+        data = read_full_tick_cache(r, "acct", ["600000.SH"])
+        self.assertEqual(data, {"600000.SH": {"lastPrice": 1.0}})
 
 
 if __name__ == "__main__":

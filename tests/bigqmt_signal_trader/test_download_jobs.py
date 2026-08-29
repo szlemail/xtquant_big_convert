@@ -25,11 +25,16 @@ class FakeRedis:
         self.kv = {}
         self.lists = {}
         self.expired = []
+        self.ttls = {}
 
     def setex(self, key, ttl, value):
         self.kv[key] = value
         self.expired.append((key, ttl))
+        self.ttls[key] = ttl
         return True
+
+    def ttl(self, key):
+        return self.ttls.get(key, -2)
 
     def set(self, key, value):
         self.kv[key] = value
@@ -54,6 +59,7 @@ class FakeRedis:
 
     def expire(self, key, ttl):
         self.expired.append((key, ttl))
+        self.ttls[key] = ttl
         return True
 
 
@@ -175,6 +181,20 @@ class DownloadJobsTest(unittest.TestCase):
         queued = r.lists[queue_key("acct")][0]
         self.assertTrue(all(not c.isdigit() for c in stored_blob))
         self.assertTrue(all(not c.isdigit() for c in queued))
+
+    def test_short_ttl_job_does_not_shorten_shared_queue_ttl(self):
+        # The queue key is shared by every pending job; a later 60s job must
+        # not cut the TTL of 1h jobs still queued ahead of it.
+        r = FakeRedis()
+        submit_download_job(r, "acct", ["600000.SH"], "1d", job_ttl_seconds=3600)
+        submit_download_job(r, "acct", ["000001.SZ"], "1d", job_ttl_seconds=60)
+        self.assertEqual(r.ttls[queue_key("acct")], 3600)
+
+    def test_long_ttl_job_extends_shared_queue_ttl(self):
+        r = FakeRedis()
+        submit_download_job(r, "acct", ["600000.SH"], "1d", job_ttl_seconds=60)
+        submit_download_job(r, "acct", ["000001.SZ"], "1d", job_ttl_seconds=3600)
+        self.assertEqual(r.ttls[queue_key("acct")], 3600)
 
 
 if __name__ == "__main__":

@@ -1218,5 +1218,71 @@ class DownloadHistoryDataTest(unittest.TestCase):
         self.assertTrue(result)
 
 
+class PendingReportCancelableTest(unittest.TestCase):
+    """49 待报 must count as cancelable: a just-submitted order is exactly the
+    one an operator most urgently needs to cancel."""
+
+    def test_status_49_is_cancelable(self):
+        from bigqmt_signal_trader.redis_rpc import CANCELABLE_ORDER_STATUSES
+
+        self.assertIn("49", CANCELABLE_ORDER_STATUSES)
+        self.assertIn("50", CANCELABLE_ORDER_STATUSES)
+        self.assertIn("55", CANCELABLE_ORDER_STATUSES)
+
+    def test_query_orders_cancelable_filter_keeps_status_49(self):
+        redis_client, service = _service_with_order_gateway(FakeOrderGateway())
+
+        class PendingReportGateway(FakeOrderGateway):
+            def query_orders(self, account_id, strategy_name):
+                rows = super().query_orders(account_id, strategy_name)
+                rows[0] = OrderSnapshot(
+                    order_sys_id="pending-1",
+                    user_order_id="remark-1",
+                    stock_code="600000.SH",
+                    action="BUY",
+                    volume=100,
+                    traded_volume=0,
+                    status="49",
+                )
+                return rows
+
+        service.handlers.order_gateway = PendingReportGateway()
+        service.enqueue_payload(
+            {
+                "request_id": "cancelable-49",
+                "account_id": "acct",
+                "method": "query_stock_orders",
+                "params": {"cancelable_only": True},
+            }
+        )
+        service.drain_pending()
+
+        response = json.loads(redis_client.kv["bigqmt:rpc:resp:acct:cancelable-49"])
+        self.assertTrue(response["ok"], response["error"])
+        self.assertEqual([row["order_sys_id"] for row in response["data"]], ["pending-1"])
+
+
+class ToJsonablePandasTimestampTest(unittest.TestCase):
+    def test_timestamp_keeps_subsecond_precision(self):
+        import pandas as pd
+
+        from bigqmt_signal_trader.redis_rpc import to_jsonable
+
+        ts = pd.Timestamp("2026-08-19 09:30:15.123456")
+        # pd.Timestamp subclasses datetime, so the datetime branch used to
+        # truncate it to whole seconds before the pandas branch could run.
+        self.assertEqual(to_jsonable(ts), "2026-08-19T09:30:15.123456")
+
+    def test_plain_datetime_still_formats_without_microseconds(self):
+        import datetime as dt
+
+        from bigqmt_signal_trader.redis_rpc import to_jsonable
+
+        self.assertEqual(
+            to_jsonable(dt.datetime(2026, 8, 19, 9, 30, 15)),
+            "2026-08-19 09:30:15",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
