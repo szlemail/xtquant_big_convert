@@ -88,6 +88,17 @@ class SignalTradingApp:
         now = now or _dt.datetime.now()
         asset = self.position_provider.get_asset(self.account_id)
         positions = self.position_provider.get_positions(self.account_id)
+        # get_asset/get_positions degrade to empty on QMT query failures (e.g.
+        # context not bound), and "no asset fields + no positions" is exactly
+        # that failure signature — a real account always carries asset values.
+        # Publishing it would overwrite up-to-120s of good cached state with an
+        # empty snapshot, so downstream sell-guards would see no positions.
+        asset_empty = asset is None or (
+            getattr(asset, "cash", None) is None
+            and getattr(asset, "total_asset", None) is None
+        )
+        if asset_empty and not positions:
+            return None
         snapshot = AccountSnapshot(
             account_id=self.account_id,
             asset=asset,

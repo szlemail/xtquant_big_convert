@@ -1404,3 +1404,26 @@ class SettlementSemanticsTest(unittest.TestCase):
         self.assertTrue(all(item["success"] for item in response["data"]))
         # DryRunOrderGateway mints its own user_order_id; just require presence.
         self.assertTrue(all(item["user_order_id"] for item in response["data"]))
+
+
+class TradeContextDeferredMethodsTest(unittest.TestCase):
+    def test_official_trade_query_globals_are_deferred(self):
+        # These run QMT trade-context globals that return EMPTY off the main
+        # strategy thread; on ZMQ the receiver threads are forced on, so every
+        # one of them must route through the adjust-thread drain.
+        from bigqmt_signal_trader.redis_rpc import LISTENER_DEFERRED_METHODS
+
+        for method in (
+            "query_execution_snapshot",
+            "get_new_purchase_limit",
+            "get_assure_contract",
+            "get_enable_short_contract",
+            "get_unclosed_compacts",
+            "get_closed_compacts",
+            "get_debt_contract",
+            "get_option_subject_position",
+            "get_comb_option",
+            "query_appointment_info",
+            "get_ipo_data",
+        ):
+            self.assertIn(method, LISTENER_DEFERRED_METHODS, method)

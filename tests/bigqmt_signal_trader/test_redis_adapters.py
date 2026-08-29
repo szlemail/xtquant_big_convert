@@ -237,3 +237,44 @@ class RedisProtocolCompatTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_position_snapshot_cache_carries_full_field_set(self):
+        # The cached fallback path used to see only 5 fields per position,
+        # silently reporting frozen_volume=0 / yesterday_volume=volume —
+        # different numbers than a live query_stock_positions.
+        import json
+
+        r = FakeRedis()
+        sink = RedisPositionSyncSink(r)
+        snapshot = AccountSnapshot(
+            account_id="acct",
+            asset=AssetSnapshot(account_id="acct", cash=100.0, total_asset=1000.0),
+            positions={
+                "600000.SH": PositionSnapshot(
+                    stock_code="600000.SH",
+                    volume=100,
+                    available=60,
+                    cost=10.0,
+                    stock_name="PF Bank",
+                    market_value=1050.0,
+                    price=10.5,
+                    open_price=10.2,
+                    frozen_volume=40,
+                    on_road_volume=10,
+                    yesterday_volume=100,
+                )
+            },
+            reason="test",
+            updated_at=__import__("datetime").datetime(2026, 7, 1, 9, 31),
+        )
+
+        sink.publish(snapshot)
+
+        payload = json.loads(r.kv["bigqmt:positions:acct"])
+        cached = payload["positions"]["600000.SH"]
+        self.assertEqual(cached["frozen_volume"], 40)
+        self.assertEqual(cached["on_road_volume"], 10)
+        self.assertEqual(cached["yesterday_volume"], 100)
+        self.assertEqual(cached["market_value"], 1050.0)
+        self.assertEqual(cached["price"], 10.5)
+        self.assertEqual(cached["open_price"], 10.2)

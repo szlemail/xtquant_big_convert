@@ -34,6 +34,14 @@ def normalize_stock_code(code):
         if _DIGIT_CODE_RE.match(prefix):
             return text
     if _DIGIT_CODE_RE.match(text):
+        # 北交所：43/83/87/88（原新三板精选层转板段）与 92（920 新号段）。
+        # 误判成 .SZ 会把委托报到错误市场、持仓也永远查不到（POSITION 行
+        # 带的是 .BJ 后缀）。
+        if text.startswith(("43", "83", "87", "88", "92")):
+            return f"{text}.BJ"
+        # 沪市可转债 110/111/113/118；12 开头的深市转债走下面的 SZ。
+        if text.startswith("11"):
+            return f"{text}.SH"
         market = "SH" if text.startswith(("5", "6")) else "SZ"
         return f"{text}.{market}"
     raise ValueError(f"invalid stock code: {code}")

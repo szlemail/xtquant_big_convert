@@ -174,3 +174,57 @@ class SignalTradingAppTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SyncPositionsFailureGateTest(unittest.TestCase):
+    def _app(self, positions, asset):
+        app = SignalTradingApp(
+            signal_source=FakeSignalSource([]),
+            market_data=FakeMarketDataProvider(),
+            position_provider=_StaticPositionProvider(positions, asset),
+            order_gateway=FakeOrderGateway(),
+            position_sync_sink=FakePositionSyncSink(),
+            state_store=FakeStateStore(),
+            account_id="acct",
+        )
+        return app
+
+    def test_query_failure_signature_is_not_published(self):
+        # get_asset/get_positions degrade to empty on QMT failure; publishing
+        # that would overwrite good cached state with an empty snapshot.
+        sink = None
+        app = self._app(
+            positions={},
+            asset=AssetSnapshot(account_id="acct", cash=None, total_asset=None),
+        )
+        app.sync_positions("trade_event")
+        self.assertEqual(app.position_sync_sink.snapshots, [])
+
+    def test_real_empty_account_with_asset_still_publishes(self):
+        app = self._app(
+            positions={},
+            asset=AssetSnapshot(account_id="acct", cash=100000.0, total_asset=100000.0),
+        )
+        app.sync_positions("trade_event")
+        self.assertEqual(len(app.position_sync_sink.snapshots), 1)
+
+    def test_positions_present_still_publishes(self):
+        app = self._app(
+            positions={"000001.SZ": PositionSnapshot(stock_code="000001.SZ",
+                                                    volume=100, available=100, cost=9.5)},
+            asset=AssetSnapshot(account_id="acct", cash=None, total_asset=None),
+        )
+        app.sync_positions("trade_event")
+        self.assertEqual(len(app.position_sync_sink.snapshots), 1)
+
+
+class _StaticPositionProvider:
+    def __init__(self, positions, asset):
+        self.positions = positions
+        self.asset = asset
+
+    def get_positions(self, account_id):
+        return self.positions
+
+    def get_asset(self, account_id):
+        return self.asset

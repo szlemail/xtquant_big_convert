@@ -39,12 +39,23 @@ class RedisPositionSyncSink:
                 "market_value": getattr(snapshot.asset, "market_value", None),
             },
             "positions": {
+                # Mirror the live PositionSnapshot fields: the client's cached
+                # fallback used to see only 5 of them, silently reporting
+                # frozen_volume=0 / yesterday_volume=volume / market_value as
+                # cost*volume — different numbers than a live query.
                 code: {
                     "stock_code": position.stock_code,
                     "volume": position.volume,
                     "available": position.available,
                     "cost": position.cost,
                     "stock_name": position.stock_name,
+                    "market_value": getattr(position, "market_value", None),
+                    "price": getattr(position, "price", None),
+                    "open_price": getattr(position, "open_price", None),
+                    "frozen_volume": getattr(position, "frozen_volume", 0),
+                    "on_road_volume": getattr(position, "on_road_volume", 0),
+                    "yesterday_volume": getattr(position, "yesterday_volume", None),
+                    "direction": getattr(position, "direction", 48),
                 }
                 for code, position in snapshot.positions.items()
             },

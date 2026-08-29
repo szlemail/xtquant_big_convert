@@ -36,3 +36,30 @@ class CodeUtilsTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BareCodeMarketInferenceTest(unittest.TestCase):
+    def test_bj_codes_get_bj_suffix(self):
+        from bigqmt_signal_trader.code_utils import normalize_stock_code
+
+        for code in ("430047", "830799", "871981", "889000", "920001"):
+            self.assertEqual(normalize_stock_code(code), f"{code}.BJ", code)
+
+    def test_sh_convertible_bonds_get_sh_suffix(self):
+        from bigqmt_signal_trader.code_utils import normalize_stock_code
+
+        for code in ("110059", "111000", "113050", "118000"):
+            self.assertEqual(normalize_stock_code(code), f"{code}.SH", code)
+
+    def test_sz_convertible_bonds_stay_sz(self):
+        from bigqmt_signal_trader.code_utils import normalize_stock_code
+
+        for code in ("123088", "127000", "128100"):
+            self.assertEqual(normalize_stock_code(code), f"{code}.SZ", code)
+
+    def test_ambiguous_prefixes_unchanged(self):
+        from bigqmt_signal_trader.code_utils import normalize_stock_code
+
+        # 显式后缀永远优先，不受前缀推断影响
+        self.assertEqual(normalize_stock_code("430047.BJ"), "430047.BJ")
+        self.assertEqual(normalize_stock_code("600000.SH"), "600000.SH")

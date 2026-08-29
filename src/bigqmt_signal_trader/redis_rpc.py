@@ -141,6 +141,19 @@ LISTENER_DEFERRED_METHODS = {
     "get_ipo_data",   # 8-28: 交易类查询, 需主线程上下文 (后台线程返回空)
     "query_smt_secu_info",
     "query_smt_secu_rate",
+    # Same trade-context rule as above, via the official QMT query globals
+    # (6.x in the API reference). On ZMQ the receiver threads are forced on
+    # (background_threads), and running these off the main strategy thread
+    # returns EMPTY with ok=True — silently wrong data.
+    "query_execution_snapshot",   # order_gateway.query_orders/query_trades
+    "get_new_purchase_limit",
+    "get_assure_contract",
+    "get_enable_short_contract",
+    "get_unclosed_compacts",
+    "get_closed_compacts",
+    "get_debt_contract",
+    "get_option_subject_position",
+    "get_comb_option",
     "get_value_by_order_id",
     "get_last_order_id",
     "get_history_trade_detail_data",
