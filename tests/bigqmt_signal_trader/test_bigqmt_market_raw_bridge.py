@@ -68,6 +68,37 @@ class BigQmtRawMarketBridgeTest(unittest.TestCase):
         self.assertEqual([], data["600276.SH"]["records"])
         self.assertEqual(["stime", "close"], data["600276.SH"]["columns"])
 
+    def test_empty_field_list_requests_default_fields_with_names(self):
+        # MiniQMT treats field_list=[] as "all fields"; the raw bridge can only
+        # fabricate column names from the request, so it must request (and
+        # label) the standard OHLCV set instead of producing unnamed columns.
+        context = RawMarketContext({"600276.SH": [[1784014200000, 1, 2, 3, 4, 5, 6]]})
+        provider = BigQmtMarketDataProvider(context)
+
+        data = provider.get_market_data_ex(
+            field_list=[], stock_list=["600276.SH"], period="1m", count=1
+        )
+
+        self.assertEqual(
+            ["stime", "open", "high", "low", "close", "volume", "amount"],
+            data["600276.SH"]["columns"],
+        )
+        self.assertEqual(
+            ["open", "high", "low", "close", "volume", "amount"],
+            context.calls[0]["fields"],
+        )
+
+    def test_no_field_list_kwarg_also_gets_named_columns(self):
+        context = RawMarketContext({"600276.SH": [[1784014200000, 1, 2, 3, 4, 5, 6]]})
+        provider = BigQmtMarketDataProvider(context)
+
+        data = provider.get_market_data_ex(stock_list=["600276.SH"], period="1m", count=1)
+
+        self.assertEqual(
+            ["stime", "open", "high", "low", "close", "volume", "amount"],
+            data["600276.SH"]["columns"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

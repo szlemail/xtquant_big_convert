@@ -379,6 +379,19 @@ def _digits_only(value):
     return "".join(ch for ch in str(value or "") if ch.isdigit())
 
 
+# The raw bridge (get_market_data_ex_ori, Guotai builds) labels bars with
+# 13-digit epoch-ms timetags instead of YYYYMMDD[HHMMSS] strings. QMT bar
+# labels are China local time (UTC+8) regardless of host timezone.
+_CHINA_TZ = _dt.timezone(_dt.timedelta(hours=8))
+
+
+def _epoch_ms_to_china_datetime(digits):
+    try:
+        return _dt.datetime.fromtimestamp(int(digits) / 1000.0, _CHINA_TZ).replace(tzinfo=None)
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
 def _parse_qmt_stime(value):
     digits = _digits_only(value)
     if len(digits) >= 14:
@@ -386,6 +399,10 @@ def _parse_qmt_stime(value):
             return _dt.datetime.strptime(digits[:14], "%Y%m%d%H%M%S")
         except ValueError:
             return None
+    if len(digits) == 13:
+        # 13-digit ms timetag: truncated to 8 digits it is a garbage "date",
+        # so convert it properly instead (raw-bridge deployments).
+        return _epoch_ms_to_china_datetime(digits)
     if len(digits) >= 8:
         try:
             return _dt.datetime.strptime(digits[:8], "%Y%m%d")
@@ -398,6 +415,13 @@ def _qmt_stime_index(value):
     digits = _digits_only(value)
     if len(digits) >= 14:
         return digits[:14]
+    if len(digits) == 13:
+        # Normalize ms timetags to the same YYYYMMDDHHMMSS index form every
+        # other producer uses, or adjacent bars collapse onto one index and
+        # date-window filtering returns empty.
+        parsed = _epoch_ms_to_china_datetime(digits)
+        if parsed is not None:
+            return parsed.strftime("%Y%m%d%H%M%S")
     if len(digits) >= 8:
         return digits[:8]
     return str(value or "")

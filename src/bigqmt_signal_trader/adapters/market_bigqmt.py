@@ -547,12 +547,25 @@ class BigQmtMarketDataProvider:
     def get_market_data_ex(self, **kwargs):
         raw_method = getattr(self.context_info, "get_market_data_ex_ori", None)
         if callable(raw_method):
+            # The raw bridge loses field names when field_list is empty: it
+            # fabricates DataFrame columns from the request, and an empty list
+            # used to produce unnamed columns that defeat date-window filtering
+            # downstream. Substitute the standard OHLCV set AND request it, so
+            # the record width always matches the fabricated column names.
+            requested = kwargs.get("field_list")
+            if requested is None:
+                requested = kwargs.get("fields")
+            if not requested:
+                requested = ["open", "high", "low", "close", "volume", "amount"]
+                kwargs = dict(kwargs)
+                kwargs["field_list"] = requested
+                kwargs["fields"] = requested
             raw_data = self._call_first_supported(
                 self._market_data_shapes("get_market_data_ex_ori", **kwargs)
             )
             return _raw_market_data_payload(
                 raw_data,
-                kwargs.get("field_list") or kwargs.get("fields"),
+                requested,
                 kwargs.get("stock_list") or kwargs.get("stock_code"),
             )
         shapes = self._market_data_shapes("get_market_data_ex", **kwargs)

@@ -740,3 +740,39 @@ class XtquantCompatTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MsTimetagStimeTest(unittest.TestCase):
+    """13-digit epoch-ms stime labels (raw bridge) must normalize like dates."""
+
+    def test_index_conversion(self):
+        from bigqmt_signal_trader.xtquant_compat import _qmt_stime_index
+
+        self.assertEqual(_qmt_stime_index(1784014200000), "20260714153000")
+        self.assertEqual(_qmt_stime_index(1784014260000), "20260714153100")
+        # legacy formats unchanged
+        self.assertEqual(_qmt_stime_index("20260714"), "20260714")
+        self.assertEqual(_qmt_stime_index("20260714093000"), "20260714093000")
+
+    def test_parse_conversion(self):
+        from bigqmt_signal_trader.xtquant_compat import _parse_qmt_stime
+
+        parsed = _parse_qmt_stime(1784014200000)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed.strftime("%Y%m%d%H%M%S"), "20260714153000")
+
+    def test_normalized_frame_gets_unique_sorted_index(self):
+        import pandas as pd
+
+        from bigqmt_signal_trader.xtquant_compat import _normalize_market_data_result
+
+        df = pd.DataFrame(
+            {"stime": [1784014200000, 1784014260000, 1784014320000], "close": [55.1, 55.2, 55.3]}
+        )
+        out = _normalize_market_data_result({"600276.SH": df}, field_list=["close", "time"])
+        frame = out["600276.SH"]
+        self.assertEqual(
+            list(frame.index), ["20260714153000", "20260714153100", "20260714153200"]
+        )
+        # the MiniQMT-style time column carries real epoch ms, not None
+        self.assertEqual(list(frame["time"]), [1784014200000, 1784014260000, 1784014320000])
