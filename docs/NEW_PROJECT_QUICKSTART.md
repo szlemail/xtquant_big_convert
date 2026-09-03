@@ -48,11 +48,23 @@
 
 ## B. 客户端（每个项目做一次）
 
-### 方式一：pip 安装（推荐，项目有独立虚拟环境时）
+### 方式一：从本地源码安装（当前必选项）
+
+> ⚠️ **不要 `pip install xtquant-big-convert`**：PyPI 官方已发到 0.3.x，
+> 那是上游另一条演进线——既不含本仓库的实盘修复（结算语义、raw 桥
+> 毫秒归一化、推送自愈等），代码基线也和本地不一致。本地 main 基于
+> 0.2.14 + 12 个修复提交；QMT 服务端部署的也是这份本地代码。
 
 ```bash
-pip install xtquant-big-convert
+# 开发推荐（可编辑安装，仓库改代码即生效）：
+pip install -e D:\developing\bigqmt_convert\xtquant_big_convert
+
+# 或固定安装（拷贝当前快照）：
+pip install D:\developing\bigqmt_convert\xtquant_big_convert
 ```
+
+> 官方 pip 安装要等修复推送上游、合并发版之后才可用（届时同步评估
+> 0.3.x 基线与本地的合并）。
 
 在项目能 import 到的位置放 `bigqmt_signal_trader_client_config.py`：
 
