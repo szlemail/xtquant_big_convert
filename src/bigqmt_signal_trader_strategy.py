@@ -799,6 +799,7 @@ def init(ContextInfo):
         # e.g. zmq port conflict -> TransportError. Log it so the user sees why
         # the RPC service didn't start instead of QMT silently exiting.
         _log_startup_error("rpc service start failed: %s" % exc)
+    _start_market_data_warmup()
     try:
         _schedule_adjust_if_needed(ContextInfo, config)
     except Exception as exc:
@@ -808,6 +809,37 @@ def init(ContextInfo):
     # 启动时自动诊断：检测服务状态 + 关键函数绑定，方便发现问题
     _diag_startup(ContextInfo, config)
     return app
+
+
+def _start_market_data_warmup():
+    """Preload the market-data stack in the background (verified live).
+
+    The first market-data RPC in a fresh QMT process has to load the native
+    xtdata SDK (and, when its quote service is unreachable, wait out the
+    connect attempt before falling back to ContextInfo). Measured on the
+    gjqmt_test deployment this took long enough that every queued request hit
+    the client's 8s timeout; a warm-up call here moves that cost to startup,
+    off the request path. Daemon thread, all errors swallowed — warm-up is
+    strictly best-effort.
+    """
+    def _warm():
+        time.sleep(1.0)  # let init() finish first
+        service = _rpc_service
+        if service is None:
+            return
+        try:
+            service.handlers.handle(
+                "get_trading_dates",
+                {"market": "SH", "start_time": "", "end_time": "", "count": 1},
+            )
+            print("[bigqmt_signal_trader] market-data warm-up done")
+        except Exception as exc:
+            print("[bigqmt_signal_trader] market-data warm-up failed (ignored): %s" % exc)
+
+    try:
+        threading.Thread(target=_warm, name="bigqmt-warmup", daemon=True).start()
+    except Exception as exc:
+        _log_startup_error("warm-up thread start failed: %s" % exc)
 
 
 def _log_startup_error(message):
