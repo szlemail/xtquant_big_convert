@@ -61,6 +61,9 @@ pip install -e D:\developing\bigqmt_convert\xtquant_big_convert
 
 # 或固定安装（拷贝当前快照）：
 pip install D:\developing\bigqmt_convert\xtquant_big_convert
+
+# 或直接从我们推送了修复的 GitHub 仓库装（其他机器/CI 上用）：
+pip install "xtquant-big-convert @ git+https://github.com/szlemail/xtquant_big_convert@main"
 ```
 
 > 官方 pip 安装要等修复推送上游、合并发版之后才可用（届时同步评估
