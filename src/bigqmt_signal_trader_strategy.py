@@ -130,6 +130,8 @@ _LATENCY_PROBE_THRESHOLD_MS = 50.0
 _latency_probe_started = False
 _last_full_tick_refresh_at = 0.0
 _last_full_tick_market_refresh_at = 0.0
+# full_tick_cache 刷新的连续失败计数（熔断用，见 _refresh_full_tick_cache）。
+_full_tick_cache_failures = 0
 # Observed adjust cadence, so a mis-scheduled run_time (e.g. clamped to bar
 # cadence) is visible in the logs instead of silently costing latency.
 _adjust_tick_stats = {"last_ts": 0.0, "count": 0, "window_start": 0.0, "sum": 0.0, "min": 0.0, "max": 0.0}
@@ -545,9 +547,15 @@ def _drain_rpc_service(config):
 
 
 def _refresh_full_tick_cache(context_info, config):
-    global _last_full_tick_refresh_at, _last_full_tick_market_refresh_at
+    global _last_full_tick_refresh_at, _last_full_tick_market_refresh_at, _full_tick_cache_failures
     cache_config = dict(config.get("full_tick_cache") or {})
     if not _config_bool(cache_config.get("enabled"), True):
+        return 0
+    # 熔断：full_tick_cache 的 demand/cache 存储依赖 Redis。无 Redis 的部署
+    # （zmq 传输）里每次刷新都要先吃一次 ~3s 的 redis 连接超时，且失败会
+    # 按刷新节奏无限重试——每轮拖慢 adjust 线程、日志刷屏。连续失败 3 次
+    # 后停用刷新并只提示一次，直到策略重启重新评估。
+    if _full_tick_cache_failures >= 3:
         return 0
     account_id = str(cache_config.get("account_id") or config.get("account_id") or _account_id or "")
     if not account_id:
@@ -595,7 +603,9 @@ def _refresh_full_tick_cache(context_info, config):
                 max_wall_seconds=max_wall,
             )
         except Exception as exc:
-            _log_err("full_tick_cache", "symbol refresh failed: %s" % exc)
+            _full_tick_cache_failures += 1
+            _log_err("full_tick_cache", "symbol refresh failed (%d/3): %s"
+                     % (_full_tick_cache_failures, exc))
     if do_market:
         _last_full_tick_market_refresh_at = now
         try:
@@ -610,7 +620,17 @@ def _refresh_full_tick_cache(context_info, config):
                 max_wall_seconds=max_wall,
             )
         except Exception as exc:
-            _log_err("full_tick_cache", "market refresh failed: %s" % exc)
+            _full_tick_cache_failures += 1
+            _log_err("full_tick_cache", "market refresh failed (%d/3): %s"
+                     % (_full_tick_cache_failures, exc))
+    if _full_tick_cache_failures >= 3:
+        _log_err(
+            "full_tick_cache",
+            "refresh disabled after 3 consecutive failures -- the demand/cache "
+            "store needs a reachable Redis; zmq deployments without Redis should "
+            "set full_tick_cache_enabled=False and use direct get_full_tick RPC "
+            "instead (measured ~5s for a whole-market snapshot)",
+        )
     return refreshed
 
 
