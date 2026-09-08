@@ -196,3 +196,36 @@ class ZmqRoundTripTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ExecEventRedisTransportGateTest(unittest.TestCase):
+    """zmq deployments must not touch redis for exec events (live-observed:
+    every order event ate a 3s connect timeout and was never delivered)."""
+
+    def _load_strategy(self):
+        import importlib
+        import bigqmt_signal_trader_strategy as strategy
+        return importlib.reload(strategy)
+
+    def test_zmq_transport_returns_none(self):
+        strategy = self._load_strategy()
+        strategy._exec_event_redis_client = None
+        strategy._rpc_service = None
+        client = strategy._exec_event_redis({"rpc": {"transport": "zmq"},
+                                              "redis": {"host": "127.0.0.1"}})
+        self.assertIsNone(client)
+
+    def test_default_transport_still_builds(self):
+        from unittest import mock
+
+        strategy = self._load_strategy()
+        strategy._exec_event_redis_client = None
+        strategy._rpc_service = None
+        sentinel = object()
+        with mock.patch("bigqmt_signal_trader.adapters.redis_common.build_redis_client",
+                        return_value=sentinel):
+            client = strategy._exec_event_redis({"rpc": {"transport": "redis"},
+                                                 "redis": {"host": "127.0.0.1"}})
+        # the gate must let redis-transport deployments through to the builder
+        self.assertIs(client, sentinel)
+        strategy._exec_event_redis_client = None

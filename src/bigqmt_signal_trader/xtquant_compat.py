@@ -1429,16 +1429,26 @@ class BigQmtXtData:
             while True:
                 # get_market_data_ex 是 cache-through：每次轮询都会写入缓存，
                 # 最后一次（数据齐或超时）的结果即最终缓存内容。
-                data = self.get_market_data_ex(
-                    field_list=DEFAULT_DOWNLOAD_FIELDS,
-                    stock_list=batch,
-                    period=period,
-                    start_time=start_time,
-                    end_time=end_time,
-                    count=-1,
-                    dividend_type=dividend_type,
-                    fill_data=False,  # fill 会用全 0 占位行冒充数据，轮询判定必须关掉
-                )
+                # 盘中实测：100 只/批的应答在交易时段可超 8s 默认超时（QMT 的
+                # GIL 调度尖峰 + 实时行情负载），一批超时就炸掉整个下载——这里
+                # 放宽轮询超时并按批重试，而不是让 5200 只的预热死在一批上。
+                try:
+                    data = self.get_market_data_ex(
+                        field_list=DEFAULT_DOWNLOAD_FIELDS,
+                        stock_list=batch,
+                        period=period,
+                        start_time=start_time,
+                        end_time=end_time,
+                        count=-1,
+                        dividend_type=dividend_type,
+                        fill_data=False,  # fill 会用全 0 占位行冒充数据，轮询判定必须关掉
+                        timeout_seconds=30.0,
+                    )
+                except Exception:
+                    if time.time() >= deadline:
+                        raise
+                    time.sleep(1.0)
+                    continue
                 ready = 0
                 for code in batch:
                     df = (data or {}).get(code)

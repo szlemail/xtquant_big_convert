@@ -1108,8 +1108,20 @@ def _exec_event_redis(config):
     Previously a new client was built per order/trade callback when the RPC
     service had none (the zmq-transport case), leaking a connection pool per
     event. Reuse one; build failure returns None so publishing just skips.
+
+    Non-redis transports (zmq/mysql) return None unconditionally: those
+    deployments have no Redis by design, and a successfully CONSTRUCTED
+    client is not a reachable one -- every order/trade event then ate a
+    full connect timeout inside the QMT callback (live-observed: a 3s
+    TimeoutError per event at 08:51, with the event never delivered).
+    With None the sink falls through to the quote push channel, which is
+    exactly the zmq event path.
     """
     global _exec_event_redis_client
+    rpc_config = dict(config.get("rpc") or {})
+    transport = str(rpc_config.get("transport") or "redis").lower()
+    if transport not in ("redis", "", "default"):
+        return None
     existing = getattr(_rpc_service, "redis", None) if _rpc_service is not None else None
     if existing is not None:
         return existing
