@@ -2005,6 +2005,25 @@ class BigQmtXtTrader:
         except Exception:
             log.exception("user callback failed: on_account_status")
 
+    def _build_quote_push_channel(self):
+        """Build the exec-event push channel subscriber for zmq deployments.
+
+        Mirrors BigQmtXtData's channel builder (same address derivation: RPC
+        port + 1). This used to be called on the trader without existing
+        there -- the AttributeError was swallowed by the reconnect loop, so
+        the zmq event listener retried forever and NEVER subscribed: clients
+        got no on_stock_order / on_stock_trade even though the server was
+        publishing them (wire-verified: exec:order frames on the PUB socket
+        within ~100ms of the order)."""
+        client = self.client
+        from .quote_push_channel import RedisQuotePushChannel, ZmqQuotePushChannel
+
+        transport_name = str(getattr(client, "transport_name", "redis") or "redis").lower()
+        if transport_name in ("zmq",):
+            address = _quote_push_zmq_address(client)
+            return ZmqQuotePushChannel(connect_address=address)
+        return RedisQuotePushChannel(client._redis(), account_id=client.account_id)
+
     def _event_loop_push_channel(self):
         """zmq: exec events arrive on the same PUB socket as whole-quote data.
 
@@ -2026,6 +2045,7 @@ class BigQmtXtTrader:
                         break      # account changed -> rebuild against the new address
                     time.sleep(0.5)
             except Exception:
+                log.exception("zmq exec-event listener round failed; retrying")
                 time.sleep(1.0)
             finally:
                 if channel is not None:

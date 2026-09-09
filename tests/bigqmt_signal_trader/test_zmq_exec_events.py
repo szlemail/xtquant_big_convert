@@ -229,3 +229,52 @@ class ExecEventRedisTransportGateTest(unittest.TestCase):
         # the gate must let redis-transport deployments through to the builder
         self.assertIs(client, sentinel)
         strategy._exec_event_redis_client = None
+
+
+class TraderOwnsPushChannelBuilderTest(unittest.TestCase):
+    """The zmq exec-event loop calls self._build_quote_push_channel(); it used
+    to exist only on BigQmtXtData, so the trader's listener raised
+    AttributeError inside its swallowed-retry loop and NEVER subscribed --
+    clients silently got no order/trade callbacks (wire-verified live: the
+    server WAS publishing exec:order frames)."""
+
+    def test_trader_has_the_builder(self):
+        from bigqmt_signal_trader.xtquant_compat import BigQmtXtTrader
+
+        self.assertTrue(hasattr(BigQmtXtTrader, "_build_quote_push_channel"))
+
+    def test_zmq_listener_actually_subscribes_exec_topics(self):
+        import threading as _threading
+
+        import bigqmt_signal_trader.xtquant_compat as compat
+        from bigqmt_signal_trader.xtquant_compat import BigQmtRpcClient, BigQmtXtTrader
+
+        recorded = []
+        started = _threading.Event()
+
+        class FakeChannel(object):
+            def start_subscriber(self, topics, on_msg):
+                recorded.append(list(topics))
+                started.set()
+
+            def stop(self):
+                pass
+
+        client = BigQmtRpcClient(account_id="acct", transport="zmq")
+        trader = BigQmtXtTrader(account_id="acct")
+        trader.client = client
+        with unittest.mock.patch.object(
+                BigQmtXtTrader, "_build_quote_push_channel", return_value=FakeChannel()):
+            trader._event_running = True
+            th = _threading.Thread(target=trader._event_loop_push_channel, daemon=True)
+            th.start()
+            self.assertTrue(started.wait(3.0), "listener never subscribed")
+            trader._event_running = False
+            th.join(timeout=2.0)
+        self.assertTrue(recorded, "no subscription recorded")
+        topics = recorded[0]
+        self.assertIn("exec:order", topics)
+        self.assertIn("exec:trade", topics)
+
+
+import unittest.mock  # noqa: E402  (used above)
